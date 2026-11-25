@@ -15,12 +15,12 @@ import {
   decodeHeader,
   encodeHeader,
   selectRequirements
-} from "./chunk-HVSYG4RR.js";
+} from "./chunk-BZ4ZLW5W.js";
 
 // src/client.ts
 import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
-var DEFAULT_BASE_URL = "https://omnia-superapp.vercel.app";
+var DEFAULT_BASE_URL = "https://omniasuper.app";
 var OmniaError = class extends Error {
   status;
   code;
@@ -62,6 +62,9 @@ var Omnia = class _Omnia {
   #seed;
   #fetch;
   #payFrom;
+  #networkFee;
+  /** Unix milliseconds until which the relayer has said it will not sponsor this agent. */
+  #selfPayUntil = 0;
   #feeWallet;
   #network = null;
   #mode = null;
@@ -77,6 +80,8 @@ var Omnia = class _Omnia {
     if (typeof f !== "function") throw new OmniaError(0, "invalid_options", "This runtime has no fetch. Pass one in the options.");
     this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.#payFrom = options.payFrom ?? "auto";
+    if (options.networkFee !== void 0 && !["auto", "sponsored", "self"].includes(options.networkFee)) throw new OmniaError(0, "invalid_options", 'networkFee must be "auto", "sponsored" or "self".');
+    this.#networkFee = options.networkFee ?? "auto";
     if (options.platformFeeWallet !== void 0 && !ADDRESS.test(options.platformFeeWallet)) throw new OmniaError(0, "invalid_options", "platformFeeWallet must be a Solana address.");
     this.#feeWallet = options.platformFeeWallet ?? null;
   }
@@ -365,8 +370,10 @@ var Omnia = class _Omnia {
     }
     const mode = this.#payFrom === "own" ? null : await this.walletMode();
     const guarded = mode && mode.mode === "guarded" && !mode.frozen ? { multisig: mode.multisig, ...mode.spendingLimit ? { spendingLimit: mode.spendingLimit } : {} } : void 0;
+    const unsponsored = req.extra.sponsored === false || Date.now() < this.#selfPayUntil;
+    const selfPaid = expect.selfPaid === true || this.#networkFee === "self" || this.#networkFee === "auto" && unsponsored;
     try {
-      return await createPayment(this.#seed, req, { maxAmount: limit, allowedSplitRecipients: feeWallet ? [feeWallet] : [], guarded }, required.resource);
+      return await createPayment(this.#seed, req, { maxAmount: limit, allowedSplitRecipients: feeWallet ? [feeWallet] : [], guarded, selfPaid }, required.resource);
     } catch (e) {
       throw new OmniaError(402, "payment_not_built", `The payment could not be built: ${e.message}`, required);
     }
@@ -377,7 +384,15 @@ var Omnia = class _Omnia {
     const required = await readOffer(first.clone());
     if (!required) return this.#json(first);
     const payload = await this.#buildPayment(required, options.limit, { payTo: options.payTo });
-    const second = await this.#send(method, path, { body, sign: options.sign, payment: encodeHeader(payload) });
+    let second = await this.#send(method, path, { body, sign: options.sign, payment: encodeHeader(payload) });
+    if (second.status === 402 && this.#networkFee === "auto" && payload.accepted.extra.sponsored !== false) {
+      const refusal = await readRefusal(second.clone());
+      if (refusal) {
+        this.#selfPayUntil = refusal.until;
+        const again = await this.#buildPayment(required, options.limit, { payTo: options.payTo, selfPaid: true });
+        second = await this.#send(method, path, { body, sign: options.sign, payment: encodeHeader(again) });
+      }
+    }
     const out = await this.#json(second);
     const header = second.headers.get(X402_HEADER.response);
     if (header && out && typeof out === "object") {
@@ -436,6 +451,18 @@ var Omnia = class _Omnia {
     return body;
   }
 };
+async function readRefusal(res) {
+  try {
+    const body = await res.json();
+    const err = body?.error && typeof body.error === "object" ? body.error : null;
+    if ((err?.code ?? body?.code) !== "sponsorship_unavailable") return null;
+    const s = err?.sponsorship;
+    const daily = s?.reason === "daily_limit" && typeof s.resetsAt === "number" && s.resetsAt * 1e3 > Date.now();
+    return { until: daily ? s.resetsAt * 1e3 : Date.now() + 6e5 };
+  } catch {
+    return null;
+  }
+}
 async function readOffer(res) {
   const header = res.headers.get(X402_HEADER.required);
   if (header) {

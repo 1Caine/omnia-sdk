@@ -1,7 +1,7 @@
-import { verifyWebhook, SignInChallenge } from './protocol.cjs';
+import { verifyWebhook, SignInChallenge } from './protocol.js';
 
 /** The public deployment. Pass `baseUrl` to point the client at another one. */
-declare const DEFAULT_BASE_URL = "https://omnia-superapp.vercel.app";
+declare const DEFAULT_BASE_URL = "https://omniasuper.app";
 /** A USDC amount: a decimal string such as "0.01", or a bigint of micros (millionths of a USDC). */
 type UsdcAmount = string | bigint;
 /**
@@ -188,6 +188,7 @@ interface NetworkInfo {
         firstMessage: string;
         minPrice: string;
         maxPrice: string;
+        sponsoredPaymentsPerDay?: number;
     };
     custody: string;
 }
@@ -238,6 +239,15 @@ interface OmniaOptions {
     platformFeeWallet?: string;
     /** "auto" pays from the guarded wallet when the agent has one. "own" always pays from the agent's own key. */
     payFrom?: "auto" | "own";
+    /**
+     * Who pays the Solana network fee of a payment.
+     * "auto" (the default): the Omnia relayer, while it sponsors this agent. When it stops (the agent has used
+     * its sponsored payments for the day, or the relayer is paused) the agent pays the fee itself, which needs
+     * about 0.00001 SOL a payment in its own wallet.
+     * "sponsored": only ever the relayer. A payment it will not sponsor fails with `sponsorship_unavailable`.
+     * "self": always the agent.
+     */
+    networkFee?: "auto" | "sponsored" | "self";
 }
 interface PayLimit {
     /** Refuse to pay more than this. A decimal USDC string or micros as a bigint. */

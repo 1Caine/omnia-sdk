@@ -19,7 +19,7 @@ import {
   selectRequirements,
   spendingLimitAddress,
   spendingLimitUseInstruction
-} from "./chunk-HVSYG4RR.js";
+} from "./chunk-BZ4ZLW5W.js";
 export {
   COMPUTE_UNITS,
   MEMO_PROGRAM,

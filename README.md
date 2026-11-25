@@ -2,6 +2,8 @@
 
 The SDK for Omnia: an identity, a wallet, paid tools and an inbox for an AI agent. Payments are USDC on Solana through x402.
 
+Site: [omniasuper.app](https://omniasuper.app). Docs: [omniasuper.app/docs](https://omniasuper.app/docs). X: [@OmniaSuperApp](https://x.com/OmniaSuperApp).
+
 Omnia is non-custodial. It never holds agent or user funds, and the agent's key stays on the agent's machine. The SDK sends signatures and signed payment transactions, never the key itself.
 
 ## Install
@@ -25,7 +27,7 @@ const { result, payment } = await omnia.call("crypto-prices", { assets: ["SOL"] 
 console.log(result, payment.explorer);
 ```
 
-The agent needs USDC only. The Omnia relayer pays the Solana network fee of every payment.
+The agent can start with USDC only. The Omnia relayer pays the Solana network fee of its first 200 payments each UTC day. After that, or while the relayer is paused, the agent pays the fee itself, about 0.00001 SOL a payment, and the client does this on its own. Set `networkFee: "sponsored"` to never pay it, or `networkFee: "self"` to always pay it.
 
 ## The client
 

@@ -2,6 +2,10 @@
  * Static verification of an x402 payment transaction, as the Omnia
  * facilitator runs it before it adds the fee payer's signature.
  *
+ * A payment comes in one of two shapes. Sponsored: the relayer is the fee
+ * payer and the agent is the second signer. Self-paid: the agent is the fee
+ * payer and the only signer, and the relayer signs nothing and spends nothing.
+ *
  * Everything here is pure: bytes in, verdict out. It follows the static
  * layout of the `exact` Solana scheme with splits (section 5.7): compute
  * budget, compute price, one transfer per leg in order, then a memo. A leg
@@ -88,7 +92,21 @@ function readU32(data: Uint8Array, offset: number): number {
   return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(offset, true);
 }
 
-export function verifyPayment(transactionBase64: string, req: PaymentRequirements, expect: { feePayer: string; maxSplits?: number }): VerifyResult {
+/** The fee payer of a serialized payment transaction: its first account. Null when the bytes are not a version 0 transaction. */
+export function feePayerOf(transactionBase64: string): string | null {
+  try {
+    const tx = VersionedTransaction.deserialize(base64ToBytes(transactionBase64));
+    return tx.message.version === 0 ? (tx.message.staticAccountKeys[0]?.toBase58() ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `selfPaid` checks the shape in which the payer is its own fee payer: one signer, which is both. The
+ * requirements must then name that payer as `extra.feePayer`.
+ */
+export function verifyPayment(transactionBase64: string, req: PaymentRequirements, expect: { feePayer: string; maxSplits?: number; selfPaid?: boolean }): VerifyResult {
   if (req.scheme !== "exact") return fail("unsupported_scheme");
   if (req.network !== SOLANA_MAINNET) return fail("unsupported_network");
   if (req.extra?.feePayer !== expect.feePayer) return fail("fee_payer_mismatch", "requirements name another fee payer");
@@ -117,16 +135,20 @@ export function verifyPayment(transactionBase64: string, req: PaymentRequirement
   const keys = msg.staticAccountKeys;
   const feePayer = new PublicKey(expect.feePayer);
   if (!keys[0].equals(feePayer)) return fail("fee_payer_mismatch");
+  const selfPaid = expect.selfPaid === true;
   const required = msg.header.numRequiredSignatures;
-  if (required !== 2) return fail("too_many_signers", `the transaction needs ${required} signatures, a payment needs exactly 2`);
-  const signer = keys[1];
-  const signature = tx.signatures[1];
+  const needed = selfPaid ? 1 : 2;
+  if (required !== needed) return fail("too_many_signers", `the transaction needs ${required} signatures, ${selfPaid ? "a self-paid payment needs exactly 1" : "a payment needs exactly 2"}`);
+  const signer = keys[needed - 1];
+  const signature = tx.signatures[needed - 1];
   if (!signature || signature.every((b) => b === 0)) return fail("payer_signature_missing");
 
   const ixs = msg.compiledInstructions;
-  // The fee payer pays the network fee and nothing else: it may not be an account of any instruction.
-  for (const ix of ixs) {
-    if (ix.accountKeyIndexes.includes(0)) return fail("fee_payer_in_instruction");
+  // A sponsoring fee payer pays the network fee and nothing else: it may not be an account of any instruction.
+  if (!selfPaid) {
+    for (const ix of ixs) {
+      if (ix.accountKeyIndexes.includes(0)) return fail("fee_payer_in_instruction");
+    }
   }
 
   const expected = 2 + legs.length;

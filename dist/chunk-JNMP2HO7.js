@@ -6,7 +6,7 @@ import {
   base64ToBytes,
   legsOf,
   multisigVault
-} from "./chunk-HVSYG4RR.js";
+} from "./chunk-BZ4ZLW5W.js";
 
 // src/verify.ts
 import { ComputeBudgetProgram, PublicKey, VersionedTransaction } from "@solana/web3.js";
@@ -25,6 +25,14 @@ function readU64(data, offset) {
 }
 function readU32(data, offset) {
   return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(offset, true);
+}
+function feePayerOf(transactionBase64) {
+  try {
+    const tx = VersionedTransaction.deserialize(base64ToBytes(transactionBase64));
+    return tx.message.version === 0 ? tx.message.staticAccountKeys[0]?.toBase58() ?? null : null;
+  } catch {
+    return null;
+  }
 }
 function verifyPayment(transactionBase64, req, expect) {
   if (req.scheme !== "exact") return fail("unsupported_scheme");
@@ -52,14 +60,18 @@ function verifyPayment(transactionBase64, req, expect) {
   const keys = msg.staticAccountKeys;
   const feePayer = new PublicKey(expect.feePayer);
   if (!keys[0].equals(feePayer)) return fail("fee_payer_mismatch");
+  const selfPaid = expect.selfPaid === true;
   const required = msg.header.numRequiredSignatures;
-  if (required !== 2) return fail("too_many_signers", `the transaction needs ${required} signatures, a payment needs exactly 2`);
-  const signer = keys[1];
-  const signature = tx.signatures[1];
+  const needed = selfPaid ? 1 : 2;
+  if (required !== needed) return fail("too_many_signers", `the transaction needs ${required} signatures, ${selfPaid ? "a self-paid payment needs exactly 1" : "a payment needs exactly 2"}`);
+  const signer = keys[needed - 1];
+  const signature = tx.signatures[needed - 1];
   if (!signature || signature.every((b) => b === 0)) return fail("payer_signature_missing");
   const ixs = msg.compiledInstructions;
-  for (const ix of ixs) {
-    if (ix.accountKeyIndexes.includes(0)) return fail("fee_payer_in_instruction");
+  if (!selfPaid) {
+    for (const ix of ixs) {
+      if (ix.accountKeyIndexes.includes(0)) return fail("fee_payer_in_instruction");
+    }
   }
   const expected = 2 + legs.length;
   if (ixs.length !== expected && ixs.length !== expected + 1) return fail("instruction_order", `expected ${expected} or ${expected + 1} instructions, found ${ixs.length}`);
@@ -137,5 +149,6 @@ function verifyPayment(transactionBase64, req, expect) {
 
 export {
   SPONSOR_LIMITS,
+  feePayerOf,
   verifyPayment
 };

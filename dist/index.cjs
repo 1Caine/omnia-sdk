@@ -4,7 +4,7 @@
 
 
 
-var _chunkIXM64WUNcjs = require('./chunk-IXM64WUN.cjs');
+var _chunkCREWMEQLcjs = require('./chunk-CREWMEQL.cjs');
 
 
 
@@ -32,8 +32,8 @@ var _chunkWUELDQORcjs = require('./chunk-WUELDQOR.cjs');
 
 
 
-var _chunkM6EVONPCcjs = require('./chunk-M6EVONPC.cjs');
 
+var _chunk26Y25PPTcjs = require('./chunk-26Y25PPT.cjs');
 
 
 
@@ -54,8 +54,8 @@ var _chunkM6EVONPCcjs = require('./chunk-M6EVONPC.cjs');
 
 
 
-var _chunkIABZQI3Ecjs = require('./chunk-IABZQI3E.cjs');
 
+var _chunk44JN77G2cjs = require('./chunk-44JN77G2.cjs');
 
 
 
@@ -105,4 +105,6 @@ var _chunkIABZQI3Ecjs = require('./chunk-IABZQI3E.cjs');
 
 
 
-exports.COMPUTE_UNITS = _chunkIABZQI3Ecjs.COMPUTE_UNITS; exports.DEFAULT_BASE_URL = _chunkIXM64WUNcjs.DEFAULT_BASE_URL; exports.HANDLE_PATTERN = _chunkWUELDQORcjs.HANDLE_PATTERN; exports.HANDLE_SUFFIX = _chunkWUELDQORcjs.HANDLE_SUFFIX; exports.HEADER = _chunkWUELDQORcjs.HEADER; exports.MEMO_PROGRAM = _chunkIABZQI3Ecjs.MEMO_PROGRAM; exports.Omnia = _chunkIXM64WUNcjs.Omnia; exports.OmniaError = _chunkIXM64WUNcjs.OmniaError; exports.PRIORITY_MICROLAMPORTS = _chunkIABZQI3Ecjs.PRIORITY_MICROLAMPORTS; exports.SOLANA_MAINNET = _chunkIABZQI3Ecjs.SOLANA_MAINNET; exports.SPENDING_LIMIT_USE_DISCRIMINATOR = _chunkIABZQI3Ecjs.SPENDING_LIMIT_USE_DISCRIMINATOR; exports.SPONSOR_LIMITS = _chunkM6EVONPCcjs.SPONSOR_LIMITS; exports.SQUADS_PROGRAM = _chunkIABZQI3Ecjs.SQUADS_PROGRAM; exports.USDC_DECIMALS = _chunkIABZQI3Ecjs.USDC_DECIMALS; exports.USDC_MINT = _chunkIABZQI3Ecjs.USDC_MINT; exports.X402_HEADER = _chunkIABZQI3Ecjs.X402_HEADER; exports.X402_VERSION = _chunkIABZQI3Ecjs.X402_VERSION; exports.base64ToBytes = _chunkIABZQI3Ecjs.base64ToBytes; exports.bytesToBase64 = _chunkIABZQI3Ecjs.bytesToBase64; exports.createPayment = _chunkIABZQI3Ecjs.createPayment; exports.decodeHeader = _chunkIABZQI3Ecjs.decodeHeader; exports.displayHandle = _chunkWUELDQORcjs.displayHandle; exports.encodeHeader = _chunkIABZQI3Ecjs.encodeHeader; exports.formatUsdc = _chunkIXM64WUNcjs.formatUsdc; exports.generateKey = _chunkWUELDQORcjs.generateKey; exports.hmacHex = _chunkWUELDQORcjs.hmacHex; exports.keyFromSeed = _chunkWUELDQORcjs.keyFromSeed; exports.legsOf = _chunkIABZQI3Ecjs.legsOf; exports.multisigVault = _chunkIABZQI3Ecjs.multisigVault; exports.normalizeHandle = _chunkWUELDQORcjs.normalizeHandle; exports.ownerMessage = _chunkWUELDQORcjs.ownerMessage; exports.randomNonce = _chunkWUELDQORcjs.randomNonce; exports.registerMessage = _chunkWUELDQORcjs.registerMessage; exports.requestMessage = _chunkWUELDQORcjs.requestMessage; exports.seedFromSecret = _chunkWUELDQORcjs.seedFromSecret; exports.selectRequirements = _chunkIABZQI3Ecjs.selectRequirements; exports.sha256Hex = _chunkWUELDQORcjs.sha256Hex; exports.signInMessage = _chunkWUELDQORcjs.signInMessage; exports.signRequest = _chunkWUELDQORcjs.signRequest; exports.signText = _chunkWUELDQORcjs.signText; exports.spendingLimitAddress = _chunkIABZQI3Ecjs.spendingLimitAddress; exports.spendingLimitUseInstruction = _chunkIABZQI3Ecjs.spendingLimitUseInstruction; exports.toMicros = _chunkIXM64WUNcjs.toMicros; exports.verifyPayment = _chunkM6EVONPCcjs.verifyPayment; exports.verifyRequest = _chunkWUELDQORcjs.verifyRequest; exports.verifySignIn = _chunkWUELDQORcjs.verifySignIn; exports.verifyText = _chunkWUELDQORcjs.verifyText; exports.verifyWebhook = _chunkWUELDQORcjs.verifyWebhook; exports.webhookSignature = _chunkWUELDQORcjs.webhookSignature;
+
+
+exports.COMPUTE_UNITS = _chunk44JN77G2cjs.COMPUTE_UNITS; exports.DEFAULT_BASE_URL = _chunkCREWMEQLcjs.DEFAULT_BASE_URL; exports.HANDLE_PATTERN = _chunkWUELDQORcjs.HANDLE_PATTERN; exports.HANDLE_SUFFIX = _chunkWUELDQORcjs.HANDLE_SUFFIX; exports.HEADER = _chunkWUELDQORcjs.HEADER; exports.MEMO_PROGRAM = _chunk44JN77G2cjs.MEMO_PROGRAM; exports.Omnia = _chunkCREWMEQLcjs.Omnia; exports.OmniaError = _chunkCREWMEQLcjs.OmniaError; exports.PRIORITY_MICROLAMPORTS = _chunk44JN77G2cjs.PRIORITY_MICROLAMPORTS; exports.SOLANA_MAINNET = _chunk44JN77G2cjs.SOLANA_MAINNET; exports.SPENDING_LIMIT_USE_DISCRIMINATOR = _chunk44JN77G2cjs.SPENDING_LIMIT_USE_DISCRIMINATOR; exports.SPONSOR_LIMITS = _chunk26Y25PPTcjs.SPONSOR_LIMITS; exports.SQUADS_PROGRAM = _chunk44JN77G2cjs.SQUADS_PROGRAM; exports.USDC_DECIMALS = _chunk44JN77G2cjs.USDC_DECIMALS; exports.USDC_MINT = _chunk44JN77G2cjs.USDC_MINT; exports.X402_HEADER = _chunk44JN77G2cjs.X402_HEADER; exports.X402_VERSION = _chunk44JN77G2cjs.X402_VERSION; exports.base64ToBytes = _chunk44JN77G2cjs.base64ToBytes; exports.bytesToBase64 = _chunk44JN77G2cjs.bytesToBase64; exports.createPayment = _chunk44JN77G2cjs.createPayment; exports.decodeHeader = _chunk44JN77G2cjs.decodeHeader; exports.displayHandle = _chunkWUELDQORcjs.displayHandle; exports.encodeHeader = _chunk44JN77G2cjs.encodeHeader; exports.feePayerOf = _chunk26Y25PPTcjs.feePayerOf; exports.formatUsdc = _chunkCREWMEQLcjs.formatUsdc; exports.generateKey = _chunkWUELDQORcjs.generateKey; exports.hmacHex = _chunkWUELDQORcjs.hmacHex; exports.keyFromSeed = _chunkWUELDQORcjs.keyFromSeed; exports.legsOf = _chunk44JN77G2cjs.legsOf; exports.multisigVault = _chunk44JN77G2cjs.multisigVault; exports.normalizeHandle = _chunkWUELDQORcjs.normalizeHandle; exports.ownerMessage = _chunkWUELDQORcjs.ownerMessage; exports.randomNonce = _chunkWUELDQORcjs.randomNonce; exports.registerMessage = _chunkWUELDQORcjs.registerMessage; exports.requestMessage = _chunkWUELDQORcjs.requestMessage; exports.seedFromSecret = _chunkWUELDQORcjs.seedFromSecret; exports.selectRequirements = _chunk44JN77G2cjs.selectRequirements; exports.sha256Hex = _chunkWUELDQORcjs.sha256Hex; exports.signInMessage = _chunkWUELDQORcjs.signInMessage; exports.signRequest = _chunkWUELDQORcjs.signRequest; exports.signText = _chunkWUELDQORcjs.signText; exports.spendingLimitAddress = _chunk44JN77G2cjs.spendingLimitAddress; exports.spendingLimitUseInstruction = _chunk44JN77G2cjs.spendingLimitUseInstruction; exports.toMicros = _chunkCREWMEQLcjs.toMicros; exports.verifyPayment = _chunk26Y25PPTcjs.verifyPayment; exports.verifyRequest = _chunkWUELDQORcjs.verifyRequest; exports.verifySignIn = _chunkWUELDQORcjs.verifySignIn; exports.verifyText = _chunkWUELDQORcjs.verifyText; exports.verifyWebhook = _chunkWUELDQORcjs.verifyWebhook; exports.webhookSignature = _chunkWUELDQORcjs.webhookSignature;

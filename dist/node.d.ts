@@ -1,4 +1,4 @@
-import { O as Omnia } from './client-zVwXIOQN.js';
+import { O as Omnia } from './client-DNV19hRn.js';
 import './protocol.js';
 
 interface Identity {

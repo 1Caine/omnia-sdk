@@ -37,7 +37,7 @@ import {
 } from "./x402";
 
 /** The public deployment. Pass `baseUrl` to point the client at another one. */
-export const DEFAULT_BASE_URL = "https://omnia-superapp.vercel.app";
+export const DEFAULT_BASE_URL = "https://omniasuper.app";
 
 /** A USDC amount: a decimal string such as "0.01", or a bigint of micros (millionths of a USDC). */
 export type UsdcAmount = string | bigint;
@@ -240,7 +240,7 @@ export interface NetworkInfo {
   network: string;
   asset: { symbol: string; mint: string; decimals: number };
   wallets: { relayer: string; platformFee: string };
-  rules: { platformFeeBps: number; firstMessage: string; minPrice: string; maxPrice: string };
+  rules: { platformFeeBps: number; firstMessage: string; minPrice: string; maxPrice: string; sponsoredPaymentsPerDay?: number };
   custody: string;
 }
 
@@ -282,6 +282,15 @@ export interface OmniaOptions {
   platformFeeWallet?: string;
   /** "auto" pays from the guarded wallet when the agent has one. "own" always pays from the agent's own key. */
   payFrom?: "auto" | "own";
+  /**
+   * Who pays the Solana network fee of a payment.
+   * "auto" (the default): the Omnia relayer, while it sponsors this agent. When it stops (the agent has used
+   * its sponsored payments for the day, or the relayer is paused) the agent pays the fee itself, which needs
+   * about 0.00001 SOL a payment in its own wallet.
+   * "sponsored": only ever the relayer. A payment it will not sponsor fails with `sponsorship_unavailable`.
+   * "self": always the agent.
+   */
+  networkFee?: "auto" | "sponsored" | "self";
 }
 
 export interface PayLimit {
@@ -310,6 +319,9 @@ export class Omnia {
   readonly #seed: Uint8Array;
   readonly #fetch: typeof fetch;
   readonly #payFrom: "auto" | "own";
+  readonly #networkFee: "auto" | "sponsored" | "self";
+  /** Unix milliseconds until which the relayer has said it will not sponsor this agent. */
+  #selfPayUntil = 0;
   #feeWallet: string | null;
   #network: Promise<NetworkInfo> | null = null;
   #mode: { at: number; value: WalletMode } | null = null;
@@ -326,6 +338,8 @@ export class Omnia {
     if (typeof f !== "function") throw new OmniaError(0, "invalid_options", "This runtime has no fetch. Pass one in the options.");
     this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.#payFrom = options.payFrom ?? "auto";
+    if (options.networkFee !== undefined && !["auto", "sponsored", "self"].includes(options.networkFee)) throw new OmniaError(0, "invalid_options", 'networkFee must be "auto", "sponsored" or "self".');
+    this.#networkFee = options.networkFee ?? "auto";
     if (options.platformFeeWallet !== undefined && !ADDRESS.test(options.platformFeeWallet)) throw new OmniaError(0, "invalid_options", "platformFeeWallet must be a Solana address.");
     this.#feeWallet = options.platformFeeWallet ?? null;
   }
@@ -634,7 +648,7 @@ export class Omnia {
   }
 
   /** Check an offer and sign the payment for it. Throws before signing when anything about the offer is off. */
-  async #buildPayment(required: PaymentRequired, limit: bigint, expect: { payTo?: string } = {}): Promise<PaymentPayload> {
+  async #buildPayment(required: PaymentRequired, limit: bigint, expect: { payTo?: string; selfPaid?: boolean } = {}): Promise<PaymentPayload> {
     const req = selectRequirements(required);
     if (!req) throw new OmniaError(402, "no_supported_offer", "The 402 answer has no offer this client can pay. It pays USDC on Solana with the exact scheme.", required);
     if (typeof req.amount !== "string" || !/^(0|[1-9]\d{0,19})$/.test(req.amount) || !req.extra || typeof req.extra.feePayer !== "string") {
@@ -659,8 +673,12 @@ export class Omnia {
     }
     const mode = this.#payFrom === "own" ? null : await this.walletMode();
     const guarded = mode && mode.mode === "guarded" && !mode.frozen ? { multisig: mode.multisig, ...(mode.spendingLimit ? { spendingLimit: mode.spendingLimit } : {}) } : undefined;
+    // The agent pays its own network fee when it was asked to, when the offer says the relayer will not, or
+    // when the relayer has already refused it today.
+    const unsponsored = req.extra.sponsored === false || Date.now() < this.#selfPayUntil;
+    const selfPaid = expect.selfPaid === true || this.#networkFee === "self" || (this.#networkFee === "auto" && unsponsored);
     try {
-      return await createPayment(this.#seed, req, { maxAmount: limit, allowedSplitRecipients: feeWallet ? [feeWallet] : [], guarded }, required.resource);
+      return await createPayment(this.#seed, req, { maxAmount: limit, allowedSplitRecipients: feeWallet ? [feeWallet] : [], guarded, selfPaid }, required.resource);
     } catch (e) {
       throw new OmniaError(402, "payment_not_built", `The payment could not be built: ${(e as Error).message}`, required);
     }
@@ -673,7 +691,17 @@ export class Omnia {
     if (!required) return this.#json<T>(first);
     const payload = await this.#buildPayment(required, options.limit, { payTo: options.payTo });
     // The request is signed again: each signed request carries its own nonce and is accepted once.
-    const second = await this.#send(method, path, { body, sign: options.sign, payment: encodeHeader(payload) });
+    let second = await this.#send(method, path, { body, sign: options.sign, payment: encodeHeader(payload) });
+    // The relayer will not sponsor this one. The offer still stands, so it is paid again with the agent as its
+    // own fee payer, and the client remembers not to ask for sponsoring until the relayer said it starts again.
+    if (second.status === 402 && this.#networkFee === "auto" && payload.accepted.extra.sponsored !== false) {
+      const refusal = await readRefusal(second.clone());
+      if (refusal) {
+        this.#selfPayUntil = refusal.until;
+        const again = await this.#buildPayment(required, options.limit, { payTo: options.payTo, selfPaid: true });
+        second = await this.#send(method, path, { body, sign: options.sign, payment: encodeHeader(again) });
+      }
+    }
     const out = await this.#json<T>(second);
     const header = second.headers.get(X402_HEADER.response);
     if (header && out && typeof out === "object") {
@@ -740,6 +768,24 @@ export class Omnia {
 }
 
 /** The x402 offer of a 402 answer: from the PAYMENT-REQUIRED header, or from the body when the header is missing. */
+/**
+ * A 402 that says the relayer will not sponsor the payment. `until` is when to ask for sponsoring again, in
+ * unix milliseconds: the time the answer gives, or ten minutes when it gives none (a Gate site passes on the
+ * code and the sentence only).
+ */
+async function readRefusal(res: Response): Promise<{ until: number } | null> {
+  try {
+    const body = (await res.json()) as { error?: { code?: unknown; sponsorship?: { resetsAt?: unknown; reason?: unknown } }; code?: unknown } | null;
+    const err = body?.error && typeof body.error === "object" ? body.error : null;
+    if ((err?.code ?? body?.code) !== "sponsorship_unavailable") return null;
+    const s = err?.sponsorship;
+    const daily = s?.reason === "daily_limit" && typeof s.resetsAt === "number" && s.resetsAt * 1000 > Date.now();
+    return { until: daily ? (s.resetsAt as number) * 1000 : Date.now() + 600_000 };
+  } catch {
+    return null;
+  }
+}
+
 async function readOffer(res: Response): Promise<PaymentRequired | null> {
   const header = res.headers.get(X402_HEADER.required);
   if (header) {

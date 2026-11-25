@@ -5,6 +5,10 @@ import { Leg, PaymentRequirements } from './x402.js';
  * Static verification of an x402 payment transaction, as the Omnia
  * facilitator runs it before it adds the fee payer's signature.
  *
+ * A payment comes in one of two shapes. Sponsored: the relayer is the fee
+ * payer and the agent is the second signer. Self-paid: the agent is the fee
+ * payer and the only signer, and the relayer signs nothing and spends nothing.
+ *
  * Everything here is pure: bytes in, verdict out. It follows the static
  * layout of the `exact` Solana scheme with splits (section 5.7): compute
  * budget, compute price, one transfer per leg in order, then a memo. A leg
@@ -46,9 +50,16 @@ type VerifyResult = VerifiedPayment | {
     reason: VerifyReason;
     detail?: string;
 };
+/** The fee payer of a serialized payment transaction: its first account. Null when the bytes are not a version 0 transaction. */
+declare function feePayerOf(transactionBase64: string): string | null;
+/**
+ * `selfPaid` checks the shape in which the payer is its own fee payer: one signer, which is both. The
+ * requirements must then name that payer as `extra.feePayer`.
+ */
 declare function verifyPayment(transactionBase64: string, req: PaymentRequirements, expect: {
     feePayer: string;
     maxSplits?: number;
+    selfPaid?: boolean;
 }): VerifyResult;
 
-export { SPONSOR_LIMITS, type VerifiedPayment, type VerifyReason, type VerifyResult, verifyPayment };
+export { SPONSOR_LIMITS, type VerifiedPayment, type VerifyReason, type VerifyResult, feePayerOf, verifyPayment };

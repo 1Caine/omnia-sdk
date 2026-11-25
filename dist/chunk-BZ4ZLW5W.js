@@ -119,8 +119,10 @@ async function createPayment(seed, req, opts = {}, resource) {
   }
   const payer = Keypair.fromSeed(seed);
   const mint = new PublicKey(req.asset);
-  const feePayer = new PublicKey(req.extra.feePayer);
-  if (feePayer.equals(payer.publicKey)) throw new Error("The fee payer cannot be the payer.");
+  const selfPaid = opts.selfPaid === true;
+  const feePayer = selfPaid ? payer.publicKey : new PublicKey(req.extra.feePayer);
+  if (!selfPaid && feePayer.equals(payer.publicKey)) throw new Error("The fee payer cannot be the payer.");
+  const accepted = selfPaid ? { ...req, extra: { ...req.extra, feePayer: payer.publicKey.toBase58(), sponsored: false } } : req;
   const transfers = [];
   if (opts.guarded) {
     const multisig = new PublicKey(opts.guarded.multisig);
@@ -166,7 +168,7 @@ async function createPayment(seed, req, opts = {}, resource) {
   return {
     x402Version: 2,
     ...resource ? { resource } : {},
-    accepted: req,
+    accepted,
     payload: { transaction: bytesToBase64(tx.serialize()) }
   };
 }

@@ -15,12 +15,12 @@ var _chunkWUELDQORcjs = require('./chunk-WUELDQOR.cjs');
 
 
 
-var _chunkIABZQI3Ecjs = require('./chunk-IABZQI3E.cjs');
+var _chunk44JN77G2cjs = require('./chunk-44JN77G2.cjs');
 
 // src/client.ts
 var _web3js = require('@solana/web3.js');
 var _bs58 = require('bs58'); var _bs582 = _interopRequireDefault(_bs58);
-var DEFAULT_BASE_URL = "https://omnia-superapp.vercel.app";
+var DEFAULT_BASE_URL = "https://omniasuper.app";
 var OmniaError = class extends Error {
   
   
@@ -62,6 +62,9 @@ var Omnia = (_class = class _Omnia {
   #seed;
   #fetch;
   #payFrom;
+  #networkFee;
+  /** Unix milliseconds until which the relayer has said it will not sponsor this agent. */
+  #selfPayUntil = 0;
   #feeWallet;
   #network = null;
   #mode = null;
@@ -77,6 +80,8 @@ var Omnia = (_class = class _Omnia {
     if (typeof f !== "function") throw new OmniaError(0, "invalid_options", "This runtime has no fetch. Pass one in the options.");
     this.#fetch = _nullishCoalesce(options.fetch, () => ( ((input, init) => globalThis.fetch(input, init))));
     this.#payFrom = _nullishCoalesce(options.payFrom, () => ( "auto"));
+    if (options.networkFee !== void 0 && !["auto", "sponsored", "self"].includes(options.networkFee)) throw new OmniaError(0, "invalid_options", 'networkFee must be "auto", "sponsored" or "self".');
+    this.#networkFee = _nullishCoalesce(options.networkFee, () => ( "auto"));
     if (options.platformFeeWallet !== void 0 && !ADDRESS.test(options.platformFeeWallet)) throw new OmniaError(0, "invalid_options", "platformFeeWallet must be a Solana address.");
     this.#feeWallet = _nullishCoalesce(options.platformFeeWallet, () => ( null));
   }
@@ -307,7 +312,7 @@ var Omnia = (_class = class _Omnia {
         const signed = await _chunkWUELDQORcjs.signRequest.call(void 0, this.#seed, this.handle, method, url.pathname + url.search, bytes);
         for (const [k, v] of Object.entries(signed)) headers.set(k, v);
       }
-      if (payment) headers.set(_chunkIABZQI3Ecjs.X402_HEADER.signature, payment);
+      if (payment) headers.set(_chunk44JN77G2cjs.X402_HEADER.signature, payment);
       return this.#fetch(url, { ...init, method, headers, body: bytes });
     };
     const first = await attempt();
@@ -315,7 +320,7 @@ var Omnia = (_class = class _Omnia {
     const required = await readOffer(first.clone());
     if (!required) return first;
     const payload = await this.#buildPayment(required, toMicros(options.maxPrice));
-    return attempt(_chunkIABZQI3Ecjs.encodeHeader.call(void 0, payload));
+    return attempt(_chunk44JN77G2cjs.encodeHeader.call(void 0, payload));
   }
   // -------------------------------------------------------------- Internals
   async #contactLimit(options) {
@@ -341,7 +346,7 @@ var Omnia = (_class = class _Omnia {
   }
   /** Check an offer and sign the payment for it. Throws before signing when anything about the offer is off. */
   async #buildPayment(required, limit, expect = {}) {
-    const req = _chunkIABZQI3Ecjs.selectRequirements.call(void 0, required);
+    const req = _chunk44JN77G2cjs.selectRequirements.call(void 0, required);
     if (!req) throw new OmniaError(402, "no_supported_offer", "The 402 answer has no offer this client can pay. It pays USDC on Solana with the exact scheme.", required);
     if (typeof req.amount !== "string" || !/^(0|[1-9]\d{0,19})$/.test(req.amount) || !req.extra || typeof req.extra.feePayer !== "string") {
       throw new OmniaError(402, "invalid_offer", "The 402 offer is incomplete: it needs an amount and a fee payer.", required);
@@ -365,8 +370,10 @@ var Omnia = (_class = class _Omnia {
     }
     const mode = this.#payFrom === "own" ? null : await this.walletMode();
     const guarded = mode && mode.mode === "guarded" && !mode.frozen ? { multisig: mode.multisig, ...mode.spendingLimit ? { spendingLimit: mode.spendingLimit } : {} } : void 0;
+    const unsponsored = req.extra.sponsored === false || Date.now() < this.#selfPayUntil;
+    const selfPaid = expect.selfPaid === true || this.#networkFee === "self" || this.#networkFee === "auto" && unsponsored;
     try {
-      return await _chunkIABZQI3Ecjs.createPayment.call(void 0, this.#seed, req, { maxAmount: limit, allowedSplitRecipients: feeWallet ? [feeWallet] : [], guarded }, required.resource);
+      return await _chunk44JN77G2cjs.createPayment.call(void 0, this.#seed, req, { maxAmount: limit, allowedSplitRecipients: feeWallet ? [feeWallet] : [], guarded, selfPaid }, required.resource);
     } catch (e) {
       throw new OmniaError(402, "payment_not_built", `The payment could not be built: ${e.message}`, required);
     }
@@ -377,12 +384,20 @@ var Omnia = (_class = class _Omnia {
     const required = await readOffer(first.clone());
     if (!required) return this.#json(first);
     const payload = await this.#buildPayment(required, options.limit, { payTo: options.payTo });
-    const second = await this.#send(method, path, { body, sign: options.sign, payment: _chunkIABZQI3Ecjs.encodeHeader.call(void 0, payload) });
+    let second = await this.#send(method, path, { body, sign: options.sign, payment: _chunk44JN77G2cjs.encodeHeader.call(void 0, payload) });
+    if (second.status === 402 && this.#networkFee === "auto" && payload.accepted.extra.sponsored !== false) {
+      const refusal = await readRefusal(second.clone());
+      if (refusal) {
+        this.#selfPayUntil = refusal.until;
+        const again = await this.#buildPayment(required, options.limit, { payTo: options.payTo, selfPaid: true });
+        second = await this.#send(method, path, { body, sign: options.sign, payment: _chunk44JN77G2cjs.encodeHeader.call(void 0, again) });
+      }
+    }
     const out = await this.#json(second);
-    const header = second.headers.get(_chunkIABZQI3Ecjs.X402_HEADER.response);
+    const header = second.headers.get(_chunk44JN77G2cjs.X402_HEADER.response);
     if (header && out && typeof out === "object") {
       try {
-        Object.defineProperty(out, "settlement", { value: _chunkIABZQI3Ecjs.decodeHeader.call(void 0, header), enumerable: false });
+        Object.defineProperty(out, "settlement", { value: _chunk44JN77G2cjs.decodeHeader.call(void 0, header), enumerable: false });
       } catch (e5) {
       }
     }
@@ -403,7 +418,7 @@ var Omnia = (_class = class _Omnia {
     const headers = { accept: "application/json" };
     if (text !== void 0) headers["content-type"] = "application/json";
     if (options.sign) Object.assign(headers, await _chunkWUELDQORcjs.signRequest.call(void 0, this.#seed, this.handle, method, url.pathname + url.search, text));
-    if (options.payment) headers[_chunkIABZQI3Ecjs.X402_HEADER.signature] = options.payment;
+    if (options.payment) headers[_chunk44JN77G2cjs.X402_HEADER.signature] = options.payment;
     try {
       return await this.#fetch(url, { method, headers, body: text });
     } catch (e) {
@@ -436,19 +451,31 @@ var Omnia = (_class = class _Omnia {
     return body;
   }
 }, _class.__initStatic(), _class);
+async function readRefusal(res) {
+  try {
+    const body = await res.json();
+    const err = _optionalChain([body, 'optionalAccess', _6 => _6.error]) && typeof body.error === "object" ? body.error : null;
+    if ((_nullishCoalesce(_optionalChain([err, 'optionalAccess', _7 => _7.code]), () => ( _optionalChain([body, 'optionalAccess', _8 => _8.code])))) !== "sponsorship_unavailable") return null;
+    const s = _optionalChain([err, 'optionalAccess', _9 => _9.sponsorship]);
+    const daily = _optionalChain([s, 'optionalAccess', _10 => _10.reason]) === "daily_limit" && typeof s.resetsAt === "number" && s.resetsAt * 1e3 > Date.now();
+    return { until: daily ? s.resetsAt * 1e3 : Date.now() + 6e5 };
+  } catch (e7) {
+    return null;
+  }
+}
 async function readOffer(res) {
-  const header = res.headers.get(_chunkIABZQI3Ecjs.X402_HEADER.required);
+  const header = res.headers.get(_chunk44JN77G2cjs.X402_HEADER.required);
   if (header) {
     try {
-      const offer = _chunkIABZQI3Ecjs.decodeHeader.call(void 0, header);
+      const offer = _chunk44JN77G2cjs.decodeHeader.call(void 0, header);
       if (offer && offer.x402Version === 2 && Array.isArray(offer.accepts)) return offer;
-    } catch (e7) {
+    } catch (e8) {
     }
   }
   try {
     const body = await res.json();
     if (body && body.x402Version === 2 && Array.isArray(body.accepts)) return body;
-  } catch (e8) {
+  } catch (e9) {
   }
   return null;
 }

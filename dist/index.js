@@ -4,7 +4,7 @@ import {
   OmniaError,
   formatUsdc,
   toMicros
-} from "./chunk-WGZA64IM.js";
+} from "./chunk-WUKCJXHT.js";
 import {
   HANDLE_PATTERN,
   HANDLE_SUFFIX,
@@ -31,8 +31,9 @@ import {
 } from "./chunk-IV3CFBUW.js";
 import {
   SPONSOR_LIMITS,
+  feePayerOf,
   verifyPayment
-} from "./chunk-O5NL526N.js";
+} from "./chunk-JNMP2HO7.js";
 import {
   COMPUTE_UNITS,
   MEMO_PROGRAM,
@@ -54,7 +55,7 @@ import {
   selectRequirements,
   spendingLimitAddress,
   spendingLimitUseInstruction
-} from "./chunk-HVSYG4RR.js";
+} from "./chunk-BZ4ZLW5W.js";
 export {
   COMPUTE_UNITS,
   DEFAULT_BASE_URL,
@@ -79,6 +80,7 @@ export {
   decodeHeader,
   displayHandle,
   encodeHeader,
+  feePayerOf,
   formatUsdc,
   generateKey,
   hmacHex,

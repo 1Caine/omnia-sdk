@@ -41,7 +41,10 @@ interface PaymentRequirements {
     payTo: string;
     maxTimeoutSeconds: number;
     extra: {
+        /** The wallet that pays the network fee: the relayer for a sponsored payment, the payer itself otherwise. */
         feePayer: string;
+        /** False when the relayer does not sponsor this payment and the payer pays its own network fee. Absent means sponsored. */
+        sponsored?: boolean;
         memo?: string;
         recentBlockhash?: string;
         lastValidBlockHeight?: string;
@@ -120,6 +123,11 @@ interface PayOptions {
     guarded?: GuardedSource;
     /** Refuse to pay more than this, in base units. A guard against a server that changes its price. */
     maxAmount?: bigint;
+    /**
+     * Build the payment with the payer as its own fee payer, whatever fee payer the offer names. The payer then
+     * needs SOL for the network fee. The requirements sent back name the payer as `extra.feePayer`.
+     */
+    selfPaid?: boolean;
     /** Split recipients the payer accepts. When set, any other split recipient is refused. */
     allowedSplitRecipients?: string[];
     /** Needed only when the offer carries no recent blockhash. */

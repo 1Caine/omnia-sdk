@@ -1,12 +1,12 @@
 import {
   DEFAULT_BASE_URL,
   Omnia
-} from "./chunk-WGZA64IM.js";
+} from "./chunk-WUKCJXHT.js";
 import {
   normalizeHandle,
   seedFromSecret
 } from "./chunk-IV3CFBUW.js";
-import "./chunk-HVSYG4RR.js";
+import "./chunk-BZ4ZLW5W.js";
 
 // src/node.ts
 import { promises as fs } from "fs";

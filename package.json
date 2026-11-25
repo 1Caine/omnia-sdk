@@ -3,6 +3,24 @@
   "version": "0.1.0",
   "description": "The Omnia SDK: an agent's identity, wallet, paid tool calls and inbox. Payments are USDC on Solana through x402. Non-custodial: keys stay on the agent's machine.",
   "license": "MIT",
+  "homepage": "https://omniasuper.app/docs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1Caine/omnia-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/1Caine/omnia-sdk/issues"
+  },
+  "author": "Omnia (https://omniasuper.app)",
+  "keywords": [
+    "omnia",
+    "ai-agents",
+    "x402",
+    "solana",
+    "usdc",
+    "payments",
+    "identity"
+  ],
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.cjs",
@@ -72,15 +90,6 @@
   "engines": {
     "node": ">=20.19"
   },
-  "keywords": [
-    "omnia",
-    "ai-agents",
-    "x402",
-    "solana",
-    "usdc",
-    "payments",
-    "identity"
-  ],
   "dependencies": {
     "@noble/ed25519": "^2.3.0",
     "@solana/spl-token": "^0.4.9",

@@ -52,7 +52,10 @@ export interface PaymentRequirements {
   payTo: string;
   maxTimeoutSeconds: number;
   extra: {
+    /** The wallet that pays the network fee: the relayer for a sponsored payment, the payer itself otherwise. */
     feePayer: string;
+    /** False when the relayer does not sponsor this payment and the payer pays its own network fee. Absent means sponsored. */
+    sponsored?: boolean;
     memo?: string;
     recentBlockhash?: string;
     lastValidBlockHeight?: string;
@@ -234,6 +237,11 @@ export interface PayOptions {
   guarded?: GuardedSource;
   /** Refuse to pay more than this, in base units. A guard against a server that changes its price. */
   maxAmount?: bigint;
+  /**
+   * Build the payment with the payer as its own fee payer, whatever fee payer the offer names. The payer then
+   * needs SOL for the network fee. The requirements sent back name the payer as `extra.feePayer`.
+   */
+  selfPaid?: boolean;
   /** Split recipients the payer accepts. When set, any other split recipient is refused. */
   allowedSplitRecipients?: string[];
   /** Needed only when the offer carries no recent blockhash. */
@@ -257,8 +265,11 @@ export async function createPayment(seed: Uint8Array, req: PaymentRequirements, 
   }
   const payer = Keypair.fromSeed(seed);
   const mint = new PublicKey(req.asset);
-  const feePayer = new PublicKey(req.extra.feePayer);
-  if (feePayer.equals(payer.publicKey)) throw new Error("The fee payer cannot be the payer.");
+  const selfPaid = opts.selfPaid === true;
+  const feePayer = selfPaid ? payer.publicKey : new PublicKey(req.extra.feePayer);
+  // An offer that names the payer as fee payer is only ever paid on purpose.
+  if (!selfPaid && feePayer.equals(payer.publicKey)) throw new Error("The fee payer cannot be the payer.");
+  const accepted: PaymentRequirements = selfPaid ? { ...req, extra: { ...req.extra, feePayer: payer.publicKey.toBase58(), sponsored: false } } : req;
 
   const transfers: TransactionInstruction[] = [];
   if (opts.guarded) {
@@ -307,7 +318,7 @@ export async function createPayment(seed: Uint8Array, req: PaymentRequirements, 
   return {
     x402Version: 2,
     ...(resource ? { resource } : {}),
-    accepted: req,
+    accepted,
     payload: { transaction: bytesToBase64(tx.serialize()) },
   };
 }
