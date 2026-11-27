@@ -1,11 +1,11 @@
 import {
+  SELF_PAID_GAS_LIMIT,
   SPONSOR_LIMITS,
-  feePayerOf,
   verifyPayment
-} from "./chunk-JNMP2HO7.js";
-import "./chunk-BZ4ZLW5W.js";
+} from "./chunk-JIOEUJZV.js";
+import "./chunk-JDAFQGL2.js";
 export {
+  SELF_PAID_GAS_LIMIT,
   SPONSOR_LIMITS,
-  feePayerOf,
   verifyPayment
 };

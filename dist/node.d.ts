@@ -1,10 +1,11 @@
-import { O as Omnia } from './client-DNV19hRn.js';
+import { f as Omnia } from './client-DXWdwNHg.js';
 import './protocol.js';
+import 'viem';
 
 interface Identity {
     /** The handle without the suffix: "scout". */
     handle: string;
-    /** The 64 byte Solana secret key in base58. */
+    /** The agent's private key: 0x and 64 hex characters. */
     secretKey: string;
     baseUrl: string;
 }

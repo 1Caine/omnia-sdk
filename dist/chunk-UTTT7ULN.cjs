@@ -1,6 +1,6 @@
-"use strict";Object.defineProperty(exports, "__esModule", {value: true}); function _interopRequireWildcard(obj) { if (obj && obj.__esModule) { return obj; } else { var newObj = {}; if (obj != null) { for (var key in obj) { if (Object.prototype.hasOwnProperty.call(obj, key)) { newObj[key] = obj[key]; } } } newObj.default = obj; return newObj; } } function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; } function _nullishCoalesce(lhs, rhsFn) { if (lhs != null) { return lhs; } else { return rhsFn(); } }// src/protocol.ts
-var _ed25519 = require('@noble/ed25519'); var ed = _interopRequireWildcard(_ed25519);
-var _bs58 = require('bs58'); var _bs582 = _interopRequireDefault(_bs58);
+"use strict";Object.defineProperty(exports, "__esModule", {value: true}); function _nullishCoalesce(lhs, rhsFn) { if (lhs != null) { return lhs; } else { return rhsFn(); } }// src/protocol.ts
+var _accounts = require('viem/accounts');
+var _viem = require('viem');
 var HANDLE_SUFFIX = "omnia";
 var HANDLE_PATTERN = /^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){1,30}[a-z0-9]$/;
 var HEADER = {
@@ -11,6 +11,8 @@ var HEADER = {
   receipt: "x-omnia-receipt"
 };
 var enc = new TextEncoder();
+var toHex = (bytes) => `0x${[...bytes].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+var fromHex = (hex) => Uint8Array.from((_nullishCoalesce(hex.replace(/^0x/, "").match(/.{2}/g), () => ( []))).map((b) => parseInt(b, 16)));
 function normalizeHandle(input) {
   let h = input.trim().toLowerCase();
   if (h.startsWith("@")) h = h.slice(1);
@@ -19,6 +21,14 @@ function normalizeHandle(input) {
   return h;
 }
 var displayHandle = (handle) => `${handle}.${HANDLE_SUFFIX}`;
+function isAddress(value) {
+  return typeof value === "string" && _viem.isAddress.call(void 0, value);
+}
+function normalizeAddress(value) {
+  if (!isAddress(value)) throw new Error("That is not a 0x address.");
+  return _viem.getAddress.call(void 0, value);
+}
+var sameAddress = (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 async function sha256Hex(data) {
   const bytes = typeof data === "string" ? enc.encode(data) : data;
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -27,35 +37,34 @@ async function sha256Hex(data) {
 function randomNonce(bytes = 16) {
   const b = new Uint8Array(bytes);
   crypto.getRandomValues(b);
-  return _bs582.default.encode(b);
+  return toHex(b).slice(2);
 }
 async function keyFromSeed(seed) {
-  if (seed.length !== 32) throw new Error("An ed25519 seed is 32 bytes.");
-  const publicKey = await ed.getPublicKeyAsync(seed);
-  return { seed, publicKey, address: _bs582.default.encode(publicKey) };
+  if (seed.length !== 32) throw new Error("A private key is 32 bytes.");
+  return { seed, address: _accounts.privateKeyToAccount.call(void 0, toHex(seed)).address };
 }
 async function generateKey() {
-  return keyFromSeed(ed.utils.randomPrivateKey());
+  return keyFromSeed(fromHex(_accounts.generatePrivateKey.call(void 0, )));
 }
 function seedFromSecret(secret) {
   let bytes;
   if (typeof secret === "string") {
     const t = secret.trim();
-    bytes = t.startsWith("[") ? Uint8Array.from(JSON.parse(t)) : _bs582.default.decode(t);
+    if (t.startsWith("[")) bytes = Uint8Array.from(JSON.parse(t));
+    else if (/^(0x)?[0-9a-fA-F]{64}$/.test(t)) bytes = fromHex(t);
+    else throw new Error("A private key is 64 hex characters, with or without 0x.");
   } else bytes = Uint8Array.from(secret);
-  if (bytes.length === 64) return bytes.slice(0, 32);
-  if (bytes.length === 32) return bytes;
-  throw new Error("A secret key is 32 or 64 bytes.");
+  if (bytes.length !== 32) throw new Error("A private key is 32 bytes.");
+  return bytes;
 }
+var secretToHex = (seed) => toHex(seed);
 async function signText(seed, text) {
-  return _bs582.default.encode(await ed.signAsync(enc.encode(text), seed));
+  return _accounts.privateKeyToAccount.call(void 0, toHex(seed)).signMessage({ message: text });
 }
 async function verifyText(address, text, signature) {
   try {
-    const key = _bs582.default.decode(address);
-    const sig = _bs582.default.decode(signature);
-    if (key.length !== 32 || sig.length !== 64) return false;
-    return await ed.verifyAsync(sig, enc.encode(text), key);
+    if (!isAddress(address) || !/^0x[0-9a-fA-F]{130}$/.test(signature)) return false;
+    return sameAddress(await _viem.recoverMessageAddress.call(void 0, { message: text, signature }), address);
   } catch (e) {
     return false;
   }
@@ -111,7 +120,7 @@ async function verifyRequest(input) {
 function ownerMessage(handle, agentAddress, ownerAddress, issuedAt) {
   return [
     `Omnia: I am the owner of the agent ${displayHandle(handle)}.`,
-    `Agent key: ${agentAddress}`,
+    `Agent address: ${agentAddress}`,
     `Owner wallet: ${ownerAddress}`,
     `Issued: ${issuedAt}`
   ].join("\n");
@@ -175,4 +184,8 @@ async function verifyWebhook(secret, body, header, toleranceSeconds = 300, now =
 
 
 
-exports.HANDLE_SUFFIX = HANDLE_SUFFIX; exports.HANDLE_PATTERN = HANDLE_PATTERN; exports.HEADER = HEADER; exports.normalizeHandle = normalizeHandle; exports.displayHandle = displayHandle; exports.sha256Hex = sha256Hex; exports.randomNonce = randomNonce; exports.keyFromSeed = keyFromSeed; exports.generateKey = generateKey; exports.seedFromSecret = seedFromSecret; exports.signText = signText; exports.verifyText = verifyText; exports.registerMessage = registerMessage; exports.requestMessage = requestMessage; exports.signRequest = signRequest; exports.verifyRequest = verifyRequest; exports.ownerMessage = ownerMessage; exports.signInMessage = signInMessage; exports.verifySignIn = verifySignIn; exports.hmacHex = hmacHex; exports.webhookSignature = webhookSignature; exports.verifyWebhook = verifyWebhook;
+
+
+
+
+exports.HANDLE_SUFFIX = HANDLE_SUFFIX; exports.HANDLE_PATTERN = HANDLE_PATTERN; exports.HEADER = HEADER; exports.normalizeHandle = normalizeHandle; exports.displayHandle = displayHandle; exports.isAddress = isAddress; exports.normalizeAddress = normalizeAddress; exports.sameAddress = sameAddress; exports.sha256Hex = sha256Hex; exports.randomNonce = randomNonce; exports.keyFromSeed = keyFromSeed; exports.generateKey = generateKey; exports.seedFromSecret = seedFromSecret; exports.secretToHex = secretToHex; exports.signText = signText; exports.verifyText = verifyText; exports.registerMessage = registerMessage; exports.requestMessage = requestMessage; exports.signRequest = signRequest; exports.verifyRequest = verifyRequest; exports.ownerMessage = ownerMessage; exports.signInMessage = signInMessage; exports.verifySignIn = verifySignIn; exports.hmacHex = hmacHex; exports.webhookSignature = webhookSignature; exports.verifyWebhook = verifyWebhook;

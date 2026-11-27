@@ -1,65 +1,73 @@
-import { VersionedTransaction } from '@solana/web3.js';
-import { Leg, PaymentRequirements } from './x402.js';
+import { Hex } from 'viem';
+import { Leg, SignedPayment, PaymentRequirements } from './x402.js';
 
 /**
- * Static verification of an x402 payment transaction, as the Omnia
- * facilitator runs it before it adds the fee payer's signature.
+ * Static verification of an x402 payment, as the Omnia facilitator runs it
+ * before it submits anything.
  *
- * A payment comes in one of two shapes. Sponsored: the relayer is the fee
- * payer and the agent is the second signer. Self-paid: the agent is the fee
- * payer and the only signer, and the relayer signs nothing and spends nothing.
+ * A payment comes in one of two shapes. Sponsored: the payer sends its signed
+ * `Payment` message and the relayer submits it and pays the gas. Self-paid:
+ * the payer also sends a transaction it has signed itself, which calls the
+ * settling contract with that same message, and the relayer signs nothing and
+ * spends nothing.
  *
- * Everything here is pure: bytes in, verdict out. It follows the static
- * layout of the `exact` Solana scheme with splits (section 5.7): compute
- * budget, compute price, one transfer per leg in order, then a memo. A leg
- * is an SPL `TransferChecked` or a Squads v4 `spendingLimitUse`.
- *
- * The facilitator then simulates the transaction against the chain, which is
- * what proves the money is really there and the spending limit allows it.
+ * Everything here is pure: a payload in, a verdict out. It proves who signed,
+ * and that what was signed is exactly the transfers the charge asks for. The
+ * facilitator then simulates the call against the chain, which is what proves
+ * the money is there and, for a guarded wallet, that its limits allow it.
  */
 
-/** What the fee payer is prepared to sponsor. */
+/** What the relayer is prepared to submit. */
 declare const SPONSOR_LIMITS: {
-    readonly maxComputeUnits: 400000;
-    /** The priority fee the fee payer pays is units x price. This cap keeps it under 0.00004 SOL. */
-    readonly maxMicroLamportsPerUnit: 100;
     readonly maxSplits: 1;
     readonly maxMemoBytes: 256;
+    /** How far past the offer's window a deadline may be, to allow for clocks that differ. */
+    readonly clockSkewSeconds: 30;
 };
-type VerifyReason = "unsupported_scheme" | "unsupported_network" | "invalid_requirements" | "split_count_exceeded" | "invalid_transaction" | "unsupported_transaction_version" | "address_lookup_tables_not_allowed" | "fee_payer_mismatch" | "fee_payer_in_instruction" | "too_many_signers" | "payer_signature_missing" | "instruction_order" | "compute_limit_too_high" | "compute_price_too_high" | "unknown_instruction" | "leg_unmatched" | "leg_amount_mismatch" | "leg_recipient_mismatch" | "leg_asset_mismatch" | "mixed_sources" | "memo_mismatch" | "memo_too_long";
+/** The most gas a self-paid transaction may ask for. A payment uses well under half of this. */
+declare const SELF_PAID_GAS_LIMIT = 1500000n;
+type VerifyReason = "unsupported_scheme" | "unsupported_network" | "unsupported_asset" | "invalid_requirements" | "split_count_exceeded" | "invalid_payload" | "expired" | "deadline_too_far" | "signature_mismatch" | "invalid_permit" | "invalid_transaction" | "transaction_mismatch";
 interface VerifiedPayment {
     ok: true;
-    /** The key that signed the payment: the agent. */
+    /** The payment's number: the hash of the offer's memo. It can settle once. */
+    paymentId: Hex;
+    /** The agent key that signed. */
     signer: string;
-    /** Where the money comes from: the agent's own wallet, or a guarded wallet's vault. */
-    source: "wallet" | "guarded";
-    /** The account the USDC leaves: the signer, or the Squads vault. */
+    /** Whose USDC moves: the signer itself, or its guarded wallet. */
     payer: string;
-    /** Set for guarded payments. */
-    multisig: string | null;
-    spendingLimit: string | null;
+    source: "wallet" | "guarded";
+    /** The Safe, for a guarded payment. */
+    safe: string | null;
     legs: Leg[];
     total: bigint;
-    memo: string | null;
-    /** The signer's signature over the message. Unique per payment, used to refuse a replay. */
-    paymentId: string;
-    transaction: VersionedTransaction;
+    /** The call that settles the payment. */
+    call: {
+        to: `0x${string}`;
+        data: Hex;
+    };
+    /** True when the payload carries the one-time approval of the splitter. */
+    withPermit: boolean;
+    /** The payer's own signed transaction, when the payer pays its own gas. Null for a sponsored payment. */
+    selfPaid: {
+        raw: Hex;
+        hash: Hex;
+        gas: bigint;
+        maxFeePerGas: bigint;
+        nonce: number;
+    } | null;
 }
 type VerifyResult = VerifiedPayment | {
     ok: false;
     reason: VerifyReason;
     detail?: string;
 };
-/** The fee payer of a serialized payment transaction: its first account. Null when the bytes are not a version 0 transaction. */
-declare function feePayerOf(transactionBase64: string): string | null;
 /**
- * `selfPaid` checks the shape in which the payer is its own fee payer: one signer, which is both. The
- * requirements must then name that payer as `extra.feePayer`.
+ * Check a signed payment against the requirements the facilitator rebuilt from its own charge.
+ * `req.extra.validBefore` is the deadline the payer signed, taken from the payload: it is checked here.
  */
-declare function verifyPayment(transactionBase64: string, req: PaymentRequirements, expect: {
-    feePayer: string;
+declare function verifyPayment(signed: SignedPayment, req: PaymentRequirements, opts?: {
     maxSplits?: number;
-    selfPaid?: boolean;
-}): VerifyResult;
+    now?: number;
+}): Promise<VerifyResult>;
 
-export { SPONSOR_LIMITS, type VerifiedPayment, type VerifyReason, type VerifyResult, feePayerOf, verifyPayment };
+export { SELF_PAID_GAS_LIMIT, SPONSOR_LIMITS, type VerifiedPayment, type VerifyReason, type VerifyResult, verifyPayment };

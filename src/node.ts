@@ -5,18 +5,18 @@
  * agent set up with one works with the other.
  *
  * The key is written to this machine and nowhere else. Omnia stores the
- * public key only.
+ * agent's address only.
  */
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DEFAULT_BASE_URL, Omnia } from "./client";
-import { normalizeHandle, seedFromSecret } from "./protocol";
+import { normalizeHandle, secretToHex, seedFromSecret } from "./protocol";
 
 export interface Identity {
   /** The handle without the suffix: "scout". */
   handle: string;
-  /** The 64 byte Solana secret key in base58. */
+  /** The agent's private key: 0x and 64 hex characters. */
   secretKey: string;
   baseUrl: string;
 }
@@ -34,14 +34,16 @@ function check(raw: unknown, where: string): Identity {
     throw new Error(`${where} is not an Omnia identity. It needs a handle and a secretKey.`);
   }
   let handle: string;
+  let secretKey: string;
   try {
     handle = normalizeHandle(o.handle);
-    seedFromSecret(o.secretKey);
+    // Stored in one spelling, whichever of the accepted ones it was given in.
+    secretKey = secretToHex(seedFromSecret(o.secretKey));
   } catch {
     // The reason is not passed on: it could quote part of the key.
-    throw new Error(`${where} holds a handle or a secret key that is not valid.`);
+    throw new Error(`${where} holds a handle or a secret key that is not valid. The secret key is 0x and 64 hex characters. A key made before Omnia moved to Elysium has another format and cannot be used here.`);
   }
-  return { handle, secretKey: o.secretKey.trim(), baseUrl: typeof o.baseUrl === "string" && o.baseUrl ? o.baseUrl.replace(/\/+$/, "") : DEFAULT_BASE_URL };
+  return { handle, secretKey, baseUrl: typeof o.baseUrl === "string" && o.baseUrl ? o.baseUrl.replace(/\/+$/, "") : DEFAULT_BASE_URL };
 }
 
 /** Read the identity file. Null when there is none. */

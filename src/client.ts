@@ -3,21 +3,26 @@
  * machine and uses it to sign requests and to pay.
  *
  * Omnia is non-custodial. The key never leaves this process: the client sends
- * signatures and signed payment transactions, never the secret itself. Every
- * payment moves USDC straight from the agent's wallet to the recipient.
+ * signatures and signed payments, never the secret itself. Every payment
+ * moves USDC on Elysium straight from the agent's wallet to the recipient.
  *
- * Before the client signs a payment it checks the offer (x402, section 5.6 of
- * the Solana `exact` scheme): the total is not above the caller's limit, the
- * only split recipient is the platform fee wallet it pinned from the API, and
- * the fee payer is not the agent itself.
+ * Before the client signs a payment it checks the offer: the total is not
+ * above the caller's limit, the only split recipient is the platform fee
+ * wallet it pinned from the API, and the contract that settles the payment is
+ * the Omnia contract this client was built with. The last check matters most:
+ * the first payment from a wallet carries a USDC approval, and the client
+ * signs that approval for the pinned splitter only.
  */
-import { Keypair } from "@solana/web3.js";
-import bs58 from "bs58";
+import { privateKeyToAccount } from "viem/accounts";
 import {
   displayHandle,
   generateKey,
+  isAddress,
+  normalizeAddress,
   normalizeHandle,
   registerMessage,
+  sameAddress,
+  secretToHex,
   seedFromSecret,
   signInMessage,
   signRequest,
@@ -25,19 +30,37 @@ import {
   verifyWebhook,
   type SignInChallenge,
 } from "./protocol";
+import { SELF_PAID_GAS_LIMIT } from "./verify";
 import {
+  ELYSIUM_CHAIN_ID,
   X402_HEADER,
   createPayment,
   decodeHeader,
   encodeHeader,
   selectRequirements,
+  settleCall,
   type PaymentPayload,
   type PaymentRequired,
+  type PaymentRequirements,
   type SettlementResponse,
 } from "./x402";
 
 /** The public deployment. Pass `baseUrl` to point the client at another one. */
 export const DEFAULT_BASE_URL = "https://omniasuper.app";
+
+/**
+ * The contracts that settle payments on Elysium for the public deployment: the splitter for an agent's own
+ * wallet and the guard for a guarded wallet. Neither has an owner or can be upgraded. The client refuses an
+ * offer that names any other contract. Pass `contracts` to use another deployment's.
+ */
+export const OMNIA_CONTRACTS = {
+  splitter: "0x0cea55aa3049700B5EB45FDf6b4D474811aB5734",
+  guard: "0x969a62E7D47E526B515B461a8e6A8745987a9e59",
+} as const;
+
+/** Where a transaction or an address can be looked up. */
+export const explorerTx = (hash: string): string => `https://elysium.kinetiq.xyz/tx/${hash}`;
+export const explorerAddress = (address: string): string => `https://elysium.kinetiq.xyz/address/${address}`;
 
 /** A USDC amount: a decimal string such as "0.01", or a bigint of micros (millionths of a USDC). */
 export type UsdcAmount = string | bigint;
@@ -87,6 +110,14 @@ export function formatUsdc(micros: bigint | number | string): string {
   return `${neg ? "-" : ""}${a / MICROS}${frac ? `.${frac}` : ""}`;
 }
 
+/** HYPE wei as a plain decimal, cut to at most `places` places, with no trailing zeros. */
+export function formatHype(wei: bigint | string, places = 6): string {
+  const unit = 10n ** BigInt(places);
+  const cut = BigInt(wei) / 10n ** BigInt(18 - places);
+  const frac = (cut % unit).toString().padStart(places, "0").replace(/0+$/, "");
+  return `${cut / unit}${frac ? `.${frac}` : ""}`;
+}
+
 // ---------------------------------------------------------------------------
 // Shapes of the API's answers
 // ---------------------------------------------------------------------------
@@ -100,7 +131,7 @@ export interface AgentView {
   owner: string | null;
   ownerVerified: boolean;
   ownerVerifiedAt: string | null;
-  wallet: { mode: "free" } | { mode: "guarded"; vault: string; frozen: boolean };
+  wallet: { mode: "free" } | { mode: "guarded"; safe: string; frozen: boolean };
   createdAt: string;
 }
 
@@ -119,14 +150,60 @@ export interface MeView {
   stats: AgentStats;
 }
 
-export interface WalletView {
-  mode: "free" | "guarded";
+/** A wallet in free mode: the agent's own address holds the USDC. */
+export interface FreeWalletView {
+  mode: "free";
   address: string;
   balanceMicros: string;
-  hasUsdcAccount: boolean;
+  /** True once the wallet's first payment has approved the splitter. Null when it could not be read. */
+  approved: boolean | null;
   /** Where to send USDC to fund the agent. */
   topUpAddress: string;
-  [key: string]: unknown;
+}
+
+/** A wallet in guarded mode: a Safe the owner controls holds the USDC, and the agent's key pays from it within limits. */
+export interface GuardedWalletView {
+  mode: "guarded";
+  /** The agent's own address, which signs the payments. */
+  address: string;
+  agentBalanceMicros: string;
+  /** The Safe that holds the money. */
+  safe: string;
+  balanceMicros: string;
+  topUpAddress: string;
+  frozen: boolean;
+  limits: {
+    dailyMicros: string;
+    remainingMicros: string;
+    /** ISO time at which the daily amount starts again. Null when nothing has been spent in this period. */
+    resetsAt: string | null;
+    /** The most one payment may be. "0" means no cap per payment. */
+    perTxMicros: string;
+    /** The recipients the wallet may pay. Empty means any recipient. */
+    destinations: string[];
+    enforcedOnChain: string[];
+  };
+  contracts: { guard: string; allowanceModule: string };
+  feeWallet: string;
+}
+
+export type WalletView = FreeWalletView | GuardedWalletView;
+
+/** What an agent needs to sign a payment transaction it submits itself, from `GET /api/v1/gas`. */
+export interface GasTerms {
+  chainId: number;
+  address: string;
+  /** The address's next transaction number. */
+  nonce: number;
+  /** The gas limit to set, as a decimal string. */
+  gas: string;
+  /** In wei, as decimal strings. */
+  maxFeePerGas: string;
+  maxPriorityFeePerGas: string;
+  /** The HYPE the address holds, in wei. */
+  balanceWei: string;
+  /** The most the transaction can cost, in HYPE, as a decimal string. */
+  maxCost: string;
 }
 
 export interface ProgramView {
@@ -158,7 +235,7 @@ export interface ProgramStats {
   lastOk: boolean | null;
 }
 
-/** What a paid call says about its payment. `transaction` is the Solana signature. */
+/** What a paid call says about its payment. `transaction` is the transaction hash on Elysium. */
 export interface PaymentReceipt {
   transaction: string;
   explorer: string;
@@ -238,8 +315,12 @@ export interface NetworkInfo {
   docs: string;
   skill: string;
   network: string;
-  asset: { symbol: string; mint: string; decimals: number };
-  wallets: { relayer: string; platformFee: string };
+  chainId?: number;
+  asset: { symbol: string; address: string; decimals: number };
+  wallets: { relayer: string; platformFee: string; treasury?: string };
+  /** The contracts that settle payments, as the API reports them. */
+  contracts?: { splitter: string; guard: string; safeSetup: string; allowanceModule: string };
+  explorer?: string;
   rules: { platformFeeBps: number; firstMessage: string; minPrice: string; maxPrice: string; sponsoredPaymentsPerDay?: number };
   custody: string;
 }
@@ -264,29 +345,29 @@ export interface Listing {
   example?: { input?: unknown; output?: unknown };
 }
 
-/** Where the agent's payments come from. */
-export type WalletMode =
-  | { mode: "free"; address: string }
-  | { mode: "guarded"; address: string; multisig: string; vault: string | null; spendingLimit: string | null; frozen: boolean };
+/** Where the agent's payments come from. `safe` is the guarded wallet: a Safe the agent's owner controls. */
+export type WalletMode = { mode: "free"; address: string } | { mode: "guarded"; address: string; safe: string; frozen: boolean };
 
 export interface OmniaOptions {
   handle: string;
-  /** A 64 byte Solana secret key or a 32 byte seed: bytes, a JSON array or base58 text. */
+  /** The agent's private key, 32 bytes: 0x hex text (64 hex characters, with or without 0x), bytes or a JSON array. */
   secretKey?: Uint8Array | number[] | string;
-  /** The 32 byte ed25519 seed, as an alternative to `secretKey`. */
+  /** The same 32 byte private key as bytes, as an alternative to `secretKey`. */
   seed?: Uint8Array;
   baseUrl?: string;
   /** A fetch implementation, for tests and unusual runtimes. */
   fetch?: typeof fetch;
   /** Pin the platform fee wallet instead of learning it from the API on first use. */
   platformFeeWallet?: string;
+  /** The settling contracts of another deployment. The public deployment's are built in (`OMNIA_CONTRACTS`). */
+  contracts?: { splitter?: string; guard?: string };
   /** "auto" pays from the guarded wallet when the agent has one. "own" always pays from the agent's own key. */
   payFrom?: "auto" | "own";
   /**
-   * Who pays the Solana network fee of a payment.
+   * Who pays the gas of a payment on Elysium.
    * "auto" (the default): the Omnia relayer, while it sponsors this agent. When it stops (the agent has used
-   * its sponsored payments for the day, or the relayer is paused) the agent pays the fee itself, which needs
-   * about 0.00001 SOL a payment in its own wallet.
+   * its sponsored payments for the day, the payment is too small to sponsor, or the relayer is paused) the
+   * agent submits the payment itself, which needs a little HYPE in its own wallet. `gas()` says how much.
    * "sponsored": only ever the relayer. A payment it will not sponsor fails with `sponsorship_unavailable`.
    * "self": always the agent.
    */
@@ -298,9 +379,17 @@ export interface PayLimit {
   maxPrice?: UsdcAmount;
 }
 
-const ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-
 type SendOptions = { body?: unknown; sign?: boolean; payment?: string; query?: Record<string, string | number | undefined> };
+
+/** An offer that passed every check, with what is needed to sign for it. */
+interface CheckedOffer {
+  required: PaymentRequired;
+  req: PaymentRequirements;
+  limit: bigint;
+  feeWallet: string | null;
+  /** The Safe the payment comes from, when the agent pays through its guarded wallet. */
+  safe: string | null;
+}
 
 // ---------------------------------------------------------------------------
 // The client
@@ -309,7 +398,7 @@ type SendOptions = { body?: unknown; sign?: boolean; payment?: string; query?: R
 export class Omnia {
   /** The handle without the suffix: "scout". */
   readonly handle: string;
-  /** The agent's public key in base58. It is also the Solana address of its own wallet. */
+  /** The agent's 0x address on Elysium, derived from its key. It is the address of its own wallet. */
   readonly address: string;
   readonly baseUrl: string;
 
@@ -320,6 +409,7 @@ export class Omnia {
   readonly #fetch: typeof fetch;
   readonly #payFrom: "auto" | "own";
   readonly #networkFee: "auto" | "sponsored" | "self";
+  readonly #contracts: { splitter: string; guard: string };
   /** Unix milliseconds until which the relayer has said it will not sponsor this agent. */
   #selfPayUntil = 0;
   #feeWallet: string | null;
@@ -329,10 +419,10 @@ export class Omnia {
   constructor(options: OmniaOptions) {
     if (!options || typeof options.handle !== "string") throw new OmniaError(0, "invalid_options", "A handle is required.");
     const seed = options.seed ?? (options.secretKey !== undefined ? seedFromSecret(options.secretKey) : undefined);
-    if (!seed || seed.length !== 32) throw new OmniaError(0, "invalid_options", "A secret key or a 32 byte seed is required.");
+    if (!seed || seed.length !== 32) throw new OmniaError(0, "invalid_options", "A secret key of 32 bytes is required.");
     this.handle = normalizeHandle(options.handle);
     this.#seed = Uint8Array.from(seed);
-    this.address = Keypair.fromSeed(this.#seed).publicKey.toBase58();
+    this.address = privateKeyToAccount(secretToHex(this.#seed)).address;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     const f = options.fetch ?? globalThis.fetch;
     if (typeof f !== "function") throw new OmniaError(0, "invalid_options", "This runtime has no fetch. Pass one in the options.");
@@ -340,13 +430,17 @@ export class Omnia {
     this.#payFrom = options.payFrom ?? "auto";
     if (options.networkFee !== undefined && !["auto", "sponsored", "self"].includes(options.networkFee)) throw new OmniaError(0, "invalid_options", 'networkFee must be "auto", "sponsored" or "self".');
     this.#networkFee = options.networkFee ?? "auto";
-    if (options.platformFeeWallet !== undefined && !ADDRESS.test(options.platformFeeWallet)) throw new OmniaError(0, "invalid_options", "platformFeeWallet must be a Solana address.");
-    this.#feeWallet = options.platformFeeWallet ?? null;
+    if (options.platformFeeWallet !== undefined && !isAddress(options.platformFeeWallet)) throw new OmniaError(0, "invalid_options", "platformFeeWallet must be a 0x address.");
+    this.#feeWallet = options.platformFeeWallet !== undefined ? normalizeAddress(options.platformFeeWallet) : null;
+    const splitter = options.contracts?.splitter ?? OMNIA_CONTRACTS.splitter;
+    const guard = options.contracts?.guard ?? OMNIA_CONTRACTS.guard;
+    if (!isAddress(splitter) || !isAddress(guard)) throw new OmniaError(0, "invalid_options", "contracts.splitter and contracts.guard must be 0x addresses.");
+    this.#contracts = { splitter: normalizeAddress(splitter), guard: normalizeAddress(guard) };
   }
 
   /**
    * Register a new Omnia ID and return its client. A key is generated here
-   * when none is given. Only the public key and a signature are sent.
+   * when none is given. Only the address and a signature are sent.
    * Keep `client.exportSecretKey()` somewhere safe: it is the only copy.
    */
   static async register(options: {
@@ -377,9 +471,9 @@ export class Omnia {
     return `${this.baseUrl}/agent/${this.handle}`;
   }
 
-  /** The secret key as base58 text (64 bytes, the Solana format), for saving on this machine. Never send it anywhere. */
+  /** The private key as 0x and 64 hex characters, for saving on this machine. Never send it anywhere. */
   exportSecretKey(): string {
-    return bs58.encode(Keypair.fromSeed(this.#seed).secretKey);
+    return secretToHex(this.#seed);
   }
 
   // ------------------------------------------------------------- Passport
@@ -440,30 +534,34 @@ export class Omnia {
 
   /**
    * Where this agent's payments come from. Guarded mode means the agent's
-   * owner has set up a Squads account with a spending limit for this key, and
-   * payments are made through that limit automatically.
+   * owner has put its money in a Safe and given this key limits that are
+   * enforced on chain. Payments are then made from the Safe automatically.
    */
   async walletMode(options: { refresh?: boolean } = {}): Promise<WalletMode> {
     if (!options.refresh && this.#mode && Date.now() - this.#mode.at < 60_000) return this.#mode.value;
     let value: WalletMode = { mode: "free", address: this.address };
     try {
       const g = (await this.me()).agent.guarded;
-      if (g && typeof g.multisig === "string") {
-        value = {
-          mode: "guarded",
-          address: this.address,
-          multisig: g.multisig,
-          vault: typeof g.vault === "string" ? g.vault : null,
-          spendingLimit: typeof g.spendingLimit === "string" && g.spendingLimit ? g.spendingLimit : null,
-          frozen: g.frozen === true,
-        };
-      }
+      if (g && isAddress(g.safe)) value = { mode: "guarded", address: this.address, safe: normalizeAddress(g.safe), frozen: g.frozen === true };
     } catch (e) {
       // A key without a passport can still pay from its own wallet.
       if (!(e instanceof OmniaError && e.status === 401 && e.code === "auth_handle")) throw e;
     }
     this.#mode = { at: Date.now(), value };
     return value;
+  }
+
+  /**
+   * What a payment costs in gas when this agent submits it itself, and the HYPE the agent holds. Only needed
+   * once the relayer has stopped sponsoring: the client asks for it on its own before it signs such a payment.
+   */
+  async gas(): Promise<GasTerms> {
+    const t = await this.#get<GasTerms>("/gas", { query: { address: this.address } });
+    const whole = (v: unknown) => typeof v === "string" && /^\d{1,78}$/.test(v);
+    if (!t || !Number.isInteger(t.nonce) || t.nonce < 0 || !whole(t.gas) || !whole(t.maxFeePerGas) || !whole(t.maxPriorityFeePerGas) || !whole(t.balanceWei)) {
+      throw new OmniaError(0, "network_info_invalid", "The API did not say what a self-paid payment needs, so the client will not sign one.", t);
+    }
+    return t;
   }
 
   // ---------------------------------------------------------------- Store
@@ -588,7 +686,8 @@ export class Omnia {
 
   /**
    * A fetch that can pay. It works with any URL that answers 402 in x402
-   * version 2 with a Solana USDC offer, such as a site behind Omnia Gate.
+   * version 2 with an Omnia offer in USDC on Elysium, such as a site behind
+   * Omnia Gate.
    * It pays only when `maxPrice` is given, and never more than that. Without
    * `maxPrice` the 402 answer is returned as it is. With `sign: true` the
    * request also carries this agent's signed request headers.
@@ -618,8 +717,7 @@ export class Omnia {
     if (first.status !== 402 || options.maxPrice === undefined) return first;
     const required = await readOffer(first.clone());
     if (!required) return first;
-    const payload = await this.#buildPayment(required, toMicros(options.maxPrice));
-    return attempt(encodeHeader(payload));
+    return this.#pay(await this.#checkOffer(required, toMicros(options.maxPrice)), attempt);
   }
 
   // -------------------------------------------------------------- Internals
@@ -642,45 +740,127 @@ export class Omnia {
     if (this.#feeWallet) return this.#feeWallet;
     const info = await this.network();
     const wallet = info?.wallets?.platformFee;
-    if (typeof wallet !== "string" || !ADDRESS.test(wallet)) throw new OmniaError(0, "network_info_invalid", "The API did not name its platform fee wallet, so the client will not sign a payment.", info);
-    this.#feeWallet ??= wallet;
+    if (!isAddress(wallet)) throw new OmniaError(0, "network_info_invalid", "The API did not name its platform fee wallet, so the client will not sign a payment.", info);
+    this.#feeWallet ??= normalizeAddress(wallet);
     return this.#feeWallet;
   }
 
-  /** Check an offer and sign the payment for it. Throws before signing when anything about the offer is off. */
-  async #buildPayment(required: PaymentRequired, limit: bigint, expect: { payTo?: string; selfPaid?: boolean } = {}): Promise<PaymentPayload> {
+  /** Check an offer. Throws before anything is signed when something about the offer is off. */
+  async #checkOffer(required: PaymentRequired, limit: bigint, expect: { payTo?: string } = {}): Promise<CheckedOffer> {
     const req = selectRequirements(required);
-    if (!req) throw new OmniaError(402, "no_supported_offer", "The 402 answer has no offer this client can pay. It pays USDC on Solana with the exact scheme.", required);
-    if (typeof req.amount !== "string" || !/^(0|[1-9]\d{0,19})$/.test(req.amount) || !req.extra || typeof req.extra.feePayer !== "string") {
-      throw new OmniaError(402, "invalid_offer", "The 402 offer is incomplete: it needs an amount and a fee payer.", required);
+    if (!req) throw new OmniaError(402, "no_supported_offer", "The 402 answer has no offer this client can pay. It pays USDC on Elysium with the exact scheme.", required);
+    if (typeof req.amount !== "string" || !/^(0|[1-9]\d{0,19})$/.test(req.amount) || !isAddress(req.payTo) || !req.extra || typeof req.extra !== "object") {
+      throw new OmniaError(402, "invalid_offer", "The 402 offer is incomplete: it needs an amount, a recipient and the settling contract.", required);
     }
     const total = BigInt(req.amount);
     if (total > limit) {
       throw new OmniaError(402, "price_above_limit", `The offer asks for ${formatUsdc(total)} USDC, which is above the limit of ${formatUsdc(limit)} USDC for this call. Nothing was signed.`, required);
     }
-    if (req.extra.feePayer === this.address) {
-      throw new OmniaError(402, "fee_payer_is_payer", "The offer names this agent as the fee payer. A payer never sponsors its own payment, so nothing was signed.", required);
-    }
-    if (expect.payTo !== undefined && req.payTo !== expect.payTo) {
+    if (expect.payTo !== undefined && !sameAddress(req.payTo, expect.payTo)) {
       throw new OmniaError(402, "unexpected_recipient", `The offer pays ${req.payTo}, but the store lists ${expect.payTo} for this program. Nothing was signed.`, required);
     }
     const splits = req.extra.splits ?? [];
     const feeWallet = splits.length > 0 ? await this.#platformFeeWallet() : null;
     for (const s of splits) {
-      if (s.payTo !== feeWallet) {
+      if (!sameAddress(s.payTo, feeWallet)) {
         throw new OmniaError(402, "unexpected_split_recipient", `The offer sends part of the payment to ${s.payTo}, which is not the platform fee wallet. Nothing was signed.`, required);
       }
     }
     const mode = this.#payFrom === "own" ? null : await this.walletMode();
-    const guarded = mode && mode.mode === "guarded" && !mode.frozen ? { multisig: mode.multisig, ...(mode.spendingLimit ? { spendingLimit: mode.spendingLimit } : {}) } : undefined;
-    // The agent pays its own network fee when it was asked to, when the offer says the relayer will not, or
-    // when the relayer has already refused it today.
-    const unsponsored = req.extra.sponsored === false || Date.now() < this.#selfPayUntil;
-    const selfPaid = expect.selfPaid === true || this.#networkFee === "self" || (this.#networkFee === "auto" && unsponsored);
+    const safe = mode && mode.mode === "guarded" && !mode.frozen ? mode.safe : null;
+    // The payment, and the approval that goes with a wallet's first one, are signed for this contract. It has to be Omnia's.
+    const named = safe ? req.extra.guard : req.extra.splitter;
+    const pinned = safe ? this.#contracts.guard : this.#contracts.splitter;
+    if (!sameAddress(typeof named === "string" ? named : null, pinned)) {
+      throw new OmniaError(402, "unexpected_contract", `The offer settles through ${String(named)}, which is not the Omnia ${safe ? "guard" : "splitter"} this client knows (${pinned}). Nothing was signed.`, required);
+    }
+    return { required, req, limit, feeWallet, safe };
+  }
+
+  /**
+   * Sign the payment for a checked offer. `permitNonce` adds the one-time approval of the splitter. `selfPaid`
+   * adds the transaction that submits the payment, signed by this agent, which then pays its own gas.
+   */
+  async #sign(offer: CheckedOffer, options: { permitNonce?: string; selfPaid: boolean }): Promise<PaymentPayload> {
+    let payload: PaymentPayload;
     try {
-      return await createPayment(this.#seed, req, { maxAmount: limit, allowedSplitRecipients: feeWallet ? [feeWallet] : [], guarded, selfPaid }, required.resource);
+      payload = await createPayment(
+        this.#seed,
+        offer.req,
+        {
+          maxAmount: offer.limit,
+          allowedSplitRecipients: offer.feeWallet ? [offer.feeWallet] : [],
+          ...(offer.safe ? { guarded: { safe: offer.safe } } : {}),
+          ...(options.permitNonce !== undefined && !offer.safe ? { permit: { nonce: options.permitNonce } } : {}),
+        },
+        offer.required.resource,
+      );
     } catch (e) {
-      throw new OmniaError(402, "payment_not_built", `The payment could not be built: ${(e as Error).message}`, required);
+      throw new OmniaError(402, "payment_not_built", `The payment could not be built: ${(e as Error).message}`, offer.required);
+    }
+    if (!options.selfPaid) return payload;
+
+    const terms = await this.gas();
+    const gas = BigInt(terms.gas);
+    const maxFeePerGas = BigInt(terms.maxFeePerGas);
+    const maxPriorityFeePerGas = BigInt(terms.maxPriorityFeePerGas);
+    if (terms.chainId !== ELYSIUM_CHAIN_ID || gas <= 0n || gas > SELF_PAID_GAS_LIMIT || maxPriorityFeePerGas > maxFeePerGas) {
+      throw new OmniaError(0, "network_info_invalid", "The API's gas terms are not ones this client signs: the chain, the gas limit or the fee is out of range.", terms);
+    }
+    if (BigInt(terms.balanceWei) < gas * maxFeePerGas) {
+      throw new OmniaError(
+        402,
+        "network_fee_unfunded",
+        `The relayer is not sponsoring this payment, so the agent submits it and pays its own gas. That can cost up to ${terms.maxCost} HYPE, and ${this.address} holds ${formatHype(terms.balanceWei)} HYPE. Send a little HYPE on Elysium to that address. Nothing was sent.`,
+        terms,
+      );
+    }
+    // The server sends this transaction only after the work succeeded, so a failed call still costs nothing.
+    const call = settleCall(offer.req, payload.payload, offer.safe !== null);
+    payload.payload.transaction = await privateKeyToAccount(secretToHex(this.#seed)).signTransaction({
+      type: "eip1559",
+      chainId: ELYSIUM_CHAIN_ID,
+      to: call.to,
+      data: call.data,
+      value: 0n,
+      nonce: terms.nonce,
+      gas,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+    });
+    return payload;
+  }
+
+  /**
+   * Pay a checked offer: sign, send, and answer the three refusals that have a remedy, each at most once, with a
+   * new signature for the same offer.
+   *   approval_required:        the wallet's first payment. Sign the USDC permit the answer asks for.
+   *   sponsorship_unavailable:  the relayer will not pay the gas. Submit the payment as this agent ("auto" only).
+   *   stale_transaction:        the agent's transaction number moved on. Read the gas terms again.
+   * Any other answer is returned as it is.
+   */
+  async #pay(offer: CheckedOffer, send: (payment: string) => Promise<Response>): Promise<Response> {
+    const refusedByOffer = offer.req.extra.sponsored === false;
+    let selfPaid = this.#networkFee === "self" || (this.#networkFee === "auto" && (refusedByOffer || Date.now() < this.#selfPayUntil));
+    let permitNonce: string | undefined;
+    const answered = { approval: false, sponsorship: false, stale: false };
+    for (;;) {
+      const res = await send(encodeHeader(await this.#sign(offer, { permitNonce, selfPaid })));
+      if (res.status !== 402) return res;
+      const refusal = await readRefusal(res.clone());
+      if (refusal?.code === "approval_required" && !answered.approval && !offer.safe && refusal.approval && (refusal.approval.spender === null || sameAddress(refusal.approval.spender, this.#contracts.splitter))) {
+        answered.approval = true;
+        permitNonce = refusal.approval.nonce;
+      } else if (refusal?.code === "sponsorship_unavailable" && !answered.sponsorship && !selfPaid && this.#networkFee === "auto") {
+        answered.sponsorship = true;
+        // Remembered, so the next payments do not ask for sponsoring only to be refused again.
+        this.#selfPayUntil = refusal.sponsorUntil;
+        selfPaid = true;
+      } else if (refusal?.code === "stale_transaction" && !answered.stale && selfPaid) {
+        answered.stale = true;
+      } else {
+        return res;
+      }
     }
   }
 
@@ -689,19 +869,9 @@ export class Omnia {
     if (first.status !== 402) return this.#json<T>(first);
     const required = await readOffer(first.clone());
     if (!required) return this.#json<T>(first);
-    const payload = await this.#buildPayment(required, options.limit, { payTo: options.payTo });
-    // The request is signed again: each signed request carries its own nonce and is accepted once.
-    let second = await this.#send(method, path, { body, sign: options.sign, payment: encodeHeader(payload) });
-    // The relayer will not sponsor this one. The offer still stands, so it is paid again with the agent as its
-    // own fee payer, and the client remembers not to ask for sponsoring until the relayer said it starts again.
-    if (second.status === 402 && this.#networkFee === "auto" && payload.accepted.extra.sponsored !== false) {
-      const refusal = await readRefusal(second.clone());
-      if (refusal) {
-        this.#selfPayUntil = refusal.until;
-        const again = await this.#buildPayment(required, options.limit, { payTo: options.payTo, selfPaid: true });
-        second = await this.#send(method, path, { body, sign: options.sign, payment: encodeHeader(again) });
-      }
-    }
+    const offer = await this.#checkOffer(required, options.limit, { payTo: options.payTo });
+    // The request is signed again each time: a signed request carries its own nonce and is accepted once.
+    const second = await this.#pay(offer, (payment) => this.#send(method, path, { body, sign: options.sign, payment }));
     const out = await this.#json<T>(second);
     const header = second.headers.get(X402_HEADER.response);
     if (header && out && typeof out === "object") {
@@ -767,25 +937,41 @@ export class Omnia {
   }
 }
 
-/** The x402 offer of a 402 answer: from the PAYMENT-REQUIRED header, or from the body when the header is missing. */
+interface Refusal {
+  code: string;
+  /** When to ask for sponsoring again, in unix milliseconds. */
+  sponsorUntil: number;
+  /** The permit a first payment needs: the payer's permit nonce on the token, and the spender when the answer names one. */
+  approval: { nonce: string; spender: string | null } | null;
+}
+
 /**
- * A 402 that says the relayer will not sponsor the payment. `until` is when to ask for sponsoring again, in
- * unix milliseconds: the time the answer gives, or ten minutes when it gives none (a Gate site passes on the
- * code and the sentence only).
+ * The code and the details of a 402 answer that refuses a payment. For `sponsorship_unavailable`, `sponsorUntil`
+ * is the time the answer gives when the agent has used its sponsored payments for the day, and ten minutes
+ * from now for every other reason and when the answer gives no details. The count starts again every UTC day,
+ * so a time more than a day away is cut to one day: an answer cannot keep the agent paying its own gas for longer.
  */
-async function readRefusal(res: Response): Promise<{ until: number } | null> {
+async function readRefusal(res: Response): Promise<Refusal | null> {
   try {
-    const body = (await res.json()) as { error?: { code?: unknown; sponsorship?: { resetsAt?: unknown; reason?: unknown } }; code?: unknown } | null;
-    const err = body?.error && typeof body.error === "object" ? body.error : null;
-    if ((err?.code ?? body?.code) !== "sponsorship_unavailable") return null;
+    const body = (await res.json()) as { error?: unknown; code?: unknown } | null;
+    const err = body?.error && typeof body.error === "object" ? (body.error as { code?: unknown; sponsorship?: { resetsAt?: unknown; reason?: unknown }; approval?: { nonce?: unknown; spender?: unknown } }) : null;
+    const code = err?.code ?? body?.code;
+    if (typeof code !== "string") return null;
     const s = err?.sponsorship;
     const daily = s?.reason === "daily_limit" && typeof s.resetsAt === "number" && s.resetsAt * 1000 > Date.now();
-    return { until: daily ? (s.resetsAt as number) * 1000 : Date.now() + 600_000 };
+    const a = err?.approval;
+    const nonce = typeof a?.nonce === "string" || typeof a?.nonce === "number" ? String(a.nonce) : "";
+    return {
+      code,
+      sponsorUntil: daily ? Math.min((s.resetsAt as number) * 1000, Date.now() + 86_400_000) : Date.now() + 600_000,
+      approval: /^\d{1,78}$/.test(nonce) ? { nonce, spender: typeof a?.spender === "string" ? a.spender : null } : null,
+    };
   } catch {
     return null;
   }
 }
 
+/** The x402 offer of a 402 answer: from the PAYMENT-REQUIRED header, or from the body when the header is missing. */
 async function readOffer(res: Response): Promise<PaymentRequired | null> {
   const header = res.headers.get(X402_HEADER.required);
   if (header) {

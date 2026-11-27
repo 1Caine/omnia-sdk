@@ -2,6 +2,18 @@ import { verifyWebhook, SignInChallenge } from './protocol.cjs';
 
 /** The public deployment. Pass `baseUrl` to point the client at another one. */
 declare const DEFAULT_BASE_URL = "https://omniasuper.app";
+/**
+ * The contracts that settle payments on Elysium for the public deployment: the splitter for an agent's own
+ * wallet and the guard for a guarded wallet. Neither has an owner or can be upgraded. The client refuses an
+ * offer that names any other contract. Pass `contracts` to use another deployment's.
+ */
+declare const OMNIA_CONTRACTS: {
+    readonly splitter: "0x0cea55aa3049700B5EB45FDf6b4D474811aB5734";
+    readonly guard: "0x969a62E7D47E526B515B461a8e6A8745987a9e59";
+};
+/** Where a transaction or an address can be looked up. */
+declare const explorerTx: (hash: string) => string;
+declare const explorerAddress: (address: string) => string;
 /** A USDC amount: a decimal string such as "0.01", or a bigint of micros (millionths of a USDC). */
 type UsdcAmount = string | bigint;
 /**
@@ -19,6 +31,8 @@ declare class OmniaError extends Error {
 declare function toMicros(amount: UsdcAmount): bigint;
 /** 10000n becomes "0.01". USDC micros as a plain decimal with no trailing zeros. */
 declare function formatUsdc(micros: bigint | number | string): string;
+/** HYPE wei as a plain decimal, cut to at most `places` places, with no trailing zeros. */
+declare function formatHype(wei: bigint | string, places?: number): string;
 interface AgentView {
     id: string;
     handle: string;
@@ -32,7 +46,7 @@ interface AgentView {
         mode: "free";
     } | {
         mode: "guarded";
-        vault: string;
+        safe: string;
         frozen: boolean;
     };
     createdAt: string;
@@ -54,14 +68,60 @@ interface MeView {
     };
     stats: AgentStats;
 }
-interface WalletView {
-    mode: "free" | "guarded";
+/** A wallet in free mode: the agent's own address holds the USDC. */
+interface FreeWalletView {
+    mode: "free";
     address: string;
     balanceMicros: string;
-    hasUsdcAccount: boolean;
+    /** True once the wallet's first payment has approved the splitter. Null when it could not be read. */
+    approved: boolean | null;
     /** Where to send USDC to fund the agent. */
     topUpAddress: string;
-    [key: string]: unknown;
+}
+/** A wallet in guarded mode: a Safe the owner controls holds the USDC, and the agent's key pays from it within limits. */
+interface GuardedWalletView {
+    mode: "guarded";
+    /** The agent's own address, which signs the payments. */
+    address: string;
+    agentBalanceMicros: string;
+    /** The Safe that holds the money. */
+    safe: string;
+    balanceMicros: string;
+    topUpAddress: string;
+    frozen: boolean;
+    limits: {
+        dailyMicros: string;
+        remainingMicros: string;
+        /** ISO time at which the daily amount starts again. Null when nothing has been spent in this period. */
+        resetsAt: string | null;
+        /** The most one payment may be. "0" means no cap per payment. */
+        perTxMicros: string;
+        /** The recipients the wallet may pay. Empty means any recipient. */
+        destinations: string[];
+        enforcedOnChain: string[];
+    };
+    contracts: {
+        guard: string;
+        allowanceModule: string;
+    };
+    feeWallet: string;
+}
+type WalletView = FreeWalletView | GuardedWalletView;
+/** What an agent needs to sign a payment transaction it submits itself, from `GET /api/v1/gas`. */
+interface GasTerms {
+    chainId: number;
+    address: string;
+    /** The address's next transaction number. */
+    nonce: number;
+    /** The gas limit to set, as a decimal string. */
+    gas: string;
+    /** In wei, as decimal strings. */
+    maxFeePerGas: string;
+    maxPriorityFeePerGas: string;
+    /** The HYPE the address holds, in wei. */
+    balanceWei: string;
+    /** The most the transaction can cost, in HYPE, as a decimal string. */
+    maxCost: string;
 }
 interface ProgramView {
     slug: string;
@@ -96,7 +156,7 @@ interface ProgramStats {
     lastCheckedAt: string | null;
     lastOk: boolean | null;
 }
-/** What a paid call says about its payment. `transaction` is the Solana signature. */
+/** What a paid call says about its payment. `transaction` is the transaction hash on Elysium. */
 interface PaymentReceipt {
     transaction: string;
     explorer: string;
@@ -174,15 +234,25 @@ interface NetworkInfo {
     docs: string;
     skill: string;
     network: string;
+    chainId?: number;
     asset: {
         symbol: string;
-        mint: string;
+        address: string;
         decimals: number;
     };
     wallets: {
         relayer: string;
         platformFee: string;
+        treasury?: string;
     };
+    /** The contracts that settle payments, as the API reports them. */
+    contracts?: {
+        splitter: string;
+        guard: string;
+        safeSetup: string;
+        allowanceModule: string;
+    };
+    explorer?: string;
     rules: {
         platformFeeBps: number;
         firstMessage: string;
@@ -214,36 +284,39 @@ interface Listing {
         output?: unknown;
     };
 }
-/** Where the agent's payments come from. */
+/** Where the agent's payments come from. `safe` is the guarded wallet: a Safe the agent's owner controls. */
 type WalletMode = {
     mode: "free";
     address: string;
 } | {
     mode: "guarded";
     address: string;
-    multisig: string;
-    vault: string | null;
-    spendingLimit: string | null;
+    safe: string;
     frozen: boolean;
 };
 interface OmniaOptions {
     handle: string;
-    /** A 64 byte Solana secret key or a 32 byte seed: bytes, a JSON array or base58 text. */
+    /** The agent's private key, 32 bytes: 0x hex text (64 hex characters, with or without 0x), bytes or a JSON array. */
     secretKey?: Uint8Array | number[] | string;
-    /** The 32 byte ed25519 seed, as an alternative to `secretKey`. */
+    /** The same 32 byte private key as bytes, as an alternative to `secretKey`. */
     seed?: Uint8Array;
     baseUrl?: string;
     /** A fetch implementation, for tests and unusual runtimes. */
     fetch?: typeof fetch;
     /** Pin the platform fee wallet instead of learning it from the API on first use. */
     platformFeeWallet?: string;
+    /** The settling contracts of another deployment. The public deployment's are built in (`OMNIA_CONTRACTS`). */
+    contracts?: {
+        splitter?: string;
+        guard?: string;
+    };
     /** "auto" pays from the guarded wallet when the agent has one. "own" always pays from the agent's own key. */
     payFrom?: "auto" | "own";
     /**
-     * Who pays the Solana network fee of a payment.
+     * Who pays the gas of a payment on Elysium.
      * "auto" (the default): the Omnia relayer, while it sponsors this agent. When it stops (the agent has used
-     * its sponsored payments for the day, or the relayer is paused) the agent pays the fee itself, which needs
-     * about 0.00001 SOL a payment in its own wallet.
+     * its sponsored payments for the day, the payment is too small to sponsor, or the relayer is paused) the
+     * agent submits the payment itself, which needs a little HYPE in its own wallet. `gas()` says how much.
      * "sponsored": only ever the relayer. A payment it will not sponsor fails with `sponsorship_unavailable`.
      * "self": always the agent.
      */
@@ -257,7 +330,7 @@ declare class Omnia {
     #private;
     /** The handle without the suffix: "scout". */
     readonly handle: string;
-    /** The agent's public key in base58. It is also the Solana address of its own wallet. */
+    /** The agent's 0x address on Elysium, derived from its key. It is the address of its own wallet. */
     readonly address: string;
     readonly baseUrl: string;
     /** Check the `x-omnia-webhook-signature` header of a webhook delivery. */
@@ -265,7 +338,7 @@ declare class Omnia {
     constructor(options: OmniaOptions);
     /**
      * Register a new Omnia ID and return its client. A key is generated here
-     * when none is given. Only the public key and a signature are sent.
+     * when none is given. Only the address and a signature are sent.
      * Keep `client.exportSecretKey()` somewhere safe: it is the only copy.
      */
     static register(options: {
@@ -279,7 +352,7 @@ declare class Omnia {
     get id(): string;
     /** The public profile page of this agent. */
     get profileUrl(): string;
-    /** The secret key as base58 text (64 bytes, the Solana format), for saving on this machine. Never send it anywhere. */
+    /** The private key as 0x and 64 hex characters, for saving on this machine. Never send it anywhere. */
     exportSecretKey(): string;
     /** This agent's passport, including its private settings. */
     me(): Promise<MeView>;
@@ -321,12 +394,17 @@ declare class Omnia {
     }): Promise<Array<Record<string, unknown>>>;
     /**
      * Where this agent's payments come from. Guarded mode means the agent's
-     * owner has set up a Squads account with a spending limit for this key, and
-     * payments are made through that limit automatically.
+     * owner has put its money in a Safe and given this key limits that are
+     * enforced on chain. Payments are then made from the Safe automatically.
      */
     walletMode(options?: {
         refresh?: boolean;
     }): Promise<WalletMode>;
+    /**
+     * What a payment costs in gas when this agent submits it itself, and the HYPE the agent holds. Only needed
+     * once the relayer has stopped sponsoring: the client asks for it on its own before it signs such a payment.
+     */
+    gas(): Promise<GasTerms>;
     /** What the API is and where everything lives, including the platform fee wallet. */
     network(): Promise<NetworkInfo>;
     /** Every mini program in the store, with its price. */
@@ -392,7 +470,8 @@ declare class Omnia {
     block(handle: string, blocked?: boolean): Promise<void>;
     /**
      * A fetch that can pay. It works with any URL that answers 402 in x402
-     * version 2 with a Solana USDC offer, such as a site behind Omnia Gate.
+     * version 2 with an Omnia offer in USDC on Elysium, such as a site behind
+     * Omnia Gate.
      * It pays only when `maxPrice` is given, and never more than that. Without
      * `maxPrice` the 402 answer is returned as it is. With `sign: true` the
      * request also carries this agent's signed request headers.
@@ -402,4 +481,4 @@ declare class Omnia {
     }): Promise<Response>;
 }
 
-export { type AgentStats as A, type CallResult as C, DEFAULT_BASE_URL as D, type InvoiceReceipt as I, type JobView as J, type Listing as L, type MeView as M, type NetworkInfo as N, Omnia as O, type PayLimit as P, type UsdcAmount as U, type WalletMode as W, type AgentView as a, type ContactPayment as b, type InvoiceView as c, type Message as d, OmniaError as e, type OmniaOptions as f, type PaymentReceipt as g, type ProgramStats as h, type ProgramView as i, type WalletView as j, formatUsdc as k, toMicros as t };
+export { type AgentStats as A, type CallResult as C, DEFAULT_BASE_URL as D, type FreeWalletView as F, type GasTerms as G, type InvoiceReceipt as I, type JobView as J, type Listing as L, type MeView as M, type NetworkInfo as N, OMNIA_CONTRACTS as O, type PayLimit as P, type UsdcAmount as U, type WalletMode as W, type AgentView as a, type ContactPayment as b, type GuardedWalletView as c, type InvoiceView as d, type Message as e, Omnia as f, OmniaError as g, type OmniaOptions as h, type PaymentReceipt as i, type ProgramStats as j, type ProgramView as k, type WalletView as l, explorerAddress as m, explorerTx as n, formatHype as o, formatUsdc as p, toMicros as t };

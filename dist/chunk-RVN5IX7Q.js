@@ -1,6 +1,6 @@
 // src/protocol.ts
-import * as ed from "@noble/ed25519";
-import bs58 from "bs58";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { getAddress, isAddress as isHexAddress, recoverMessageAddress } from "viem";
 var HANDLE_SUFFIX = "omnia";
 var HANDLE_PATTERN = /^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){1,30}[a-z0-9]$/;
 var HEADER = {
@@ -11,6 +11,8 @@ var HEADER = {
   receipt: "x-omnia-receipt"
 };
 var enc = new TextEncoder();
+var toHex = (bytes) => `0x${[...bytes].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+var fromHex = (hex) => Uint8Array.from((hex.replace(/^0x/, "").match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)));
 function normalizeHandle(input) {
   let h = input.trim().toLowerCase();
   if (h.startsWith("@")) h = h.slice(1);
@@ -19,6 +21,14 @@ function normalizeHandle(input) {
   return h;
 }
 var displayHandle = (handle) => `${handle}.${HANDLE_SUFFIX}`;
+function isAddress(value) {
+  return typeof value === "string" && isHexAddress(value);
+}
+function normalizeAddress(value) {
+  if (!isAddress(value)) throw new Error("That is not a 0x address.");
+  return getAddress(value);
+}
+var sameAddress = (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 async function sha256Hex(data) {
   const bytes = typeof data === "string" ? enc.encode(data) : data;
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -27,35 +37,34 @@ async function sha256Hex(data) {
 function randomNonce(bytes = 16) {
   const b = new Uint8Array(bytes);
   crypto.getRandomValues(b);
-  return bs58.encode(b);
+  return toHex(b).slice(2);
 }
 async function keyFromSeed(seed) {
-  if (seed.length !== 32) throw new Error("An ed25519 seed is 32 bytes.");
-  const publicKey = await ed.getPublicKeyAsync(seed);
-  return { seed, publicKey, address: bs58.encode(publicKey) };
+  if (seed.length !== 32) throw new Error("A private key is 32 bytes.");
+  return { seed, address: privateKeyToAccount(toHex(seed)).address };
 }
 async function generateKey() {
-  return keyFromSeed(ed.utils.randomPrivateKey());
+  return keyFromSeed(fromHex(generatePrivateKey()));
 }
 function seedFromSecret(secret) {
   let bytes;
   if (typeof secret === "string") {
     const t = secret.trim();
-    bytes = t.startsWith("[") ? Uint8Array.from(JSON.parse(t)) : bs58.decode(t);
+    if (t.startsWith("[")) bytes = Uint8Array.from(JSON.parse(t));
+    else if (/^(0x)?[0-9a-fA-F]{64}$/.test(t)) bytes = fromHex(t);
+    else throw new Error("A private key is 64 hex characters, with or without 0x.");
   } else bytes = Uint8Array.from(secret);
-  if (bytes.length === 64) return bytes.slice(0, 32);
-  if (bytes.length === 32) return bytes;
-  throw new Error("A secret key is 32 or 64 bytes.");
+  if (bytes.length !== 32) throw new Error("A private key is 32 bytes.");
+  return bytes;
 }
+var secretToHex = (seed) => toHex(seed);
 async function signText(seed, text) {
-  return bs58.encode(await ed.signAsync(enc.encode(text), seed));
+  return privateKeyToAccount(toHex(seed)).signMessage({ message: text });
 }
 async function verifyText(address, text, signature) {
   try {
-    const key = bs58.decode(address);
-    const sig = bs58.decode(signature);
-    if (key.length !== 32 || sig.length !== 64) return false;
-    return await ed.verifyAsync(sig, enc.encode(text), key);
+    if (!isAddress(address) || !/^0x[0-9a-fA-F]{130}$/.test(signature)) return false;
+    return sameAddress(await recoverMessageAddress({ message: text, signature }), address);
   } catch {
     return false;
   }
@@ -111,7 +120,7 @@ async function verifyRequest(input) {
 function ownerMessage(handle, agentAddress, ownerAddress, issuedAt) {
   return [
     `Omnia: I am the owner of the agent ${displayHandle(handle)}.`,
-    `Agent key: ${agentAddress}`,
+    `Agent address: ${agentAddress}`,
     `Owner wallet: ${ownerAddress}`,
     `Issued: ${issuedAt}`
   ].join("\n");
@@ -158,11 +167,15 @@ export {
   HEADER,
   normalizeHandle,
   displayHandle,
+  isAddress,
+  normalizeAddress,
+  sameAddress,
   sha256Hex,
   randomNonce,
   keyFromSeed,
   generateKey,
   seedFromSecret,
+  secretToHex,
   signText,
   verifyText,
   registerMessage,

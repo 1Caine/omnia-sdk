@@ -1,12 +1,14 @@
 import {
   DEFAULT_BASE_URL,
   Omnia
-} from "./chunk-WUKCJXHT.js";
+} from "./chunk-FIM4CRTV.js";
 import {
   normalizeHandle,
+  secretToHex,
   seedFromSecret
-} from "./chunk-IV3CFBUW.js";
-import "./chunk-BZ4ZLW5W.js";
+} from "./chunk-RVN5IX7Q.js";
+import "./chunk-JIOEUJZV.js";
+import "./chunk-JDAFQGL2.js";
 
 // src/node.ts
 import { promises as fs } from "fs";
@@ -21,13 +23,14 @@ function check(raw, where) {
     throw new Error(`${where} is not an Omnia identity. It needs a handle and a secretKey.`);
   }
   let handle;
+  let secretKey;
   try {
     handle = normalizeHandle(o.handle);
-    seedFromSecret(o.secretKey);
+    secretKey = secretToHex(seedFromSecret(o.secretKey));
   } catch {
-    throw new Error(`${where} holds a handle or a secret key that is not valid.`);
+    throw new Error(`${where} holds a handle or a secret key that is not valid. The secret key is 0x and 64 hex characters. A key made before Omnia moved to Elysium has another format and cannot be used here.`);
   }
-  return { handle, secretKey: o.secretKey.trim(), baseUrl: typeof o.baseUrl === "string" && o.baseUrl ? o.baseUrl.replace(/\/+$/, "") : DEFAULT_BASE_URL };
+  return { handle, secretKey, baseUrl: typeof o.baseUrl === "string" && o.baseUrl ? o.baseUrl.replace(/\/+$/, "") : DEFAULT_BASE_URL };
 }
 async function loadIdentity(path = identityPath()) {
   let text;

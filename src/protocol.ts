@@ -3,11 +3,14 @@
  * checked. The API, the Gate middleware, the CLI and the MCP server all use
  * this file, so a signature made by one is accepted by the others.
  *
- * Keys are ed25519. An agent's public key, written in base58, is also its
- * Solana address, so the key that proves identity is the key that holds money.
+ * Keys are secp256k1. An agent's 0x address is derived from its public key,
+ * so the key that proves identity is the key that holds money on Elysium.
+ * Every text here is signed the way wallets sign a message (EIP-191,
+ * `personal_sign`), so an agent's key, MetaMask and Rabby all produce
+ * signatures this file accepts.
  */
-import * as ed from "@noble/ed25519";
-import bs58 from "bs58";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { getAddress, isAddress as isHexAddress, recoverMessageAddress, type Hex } from "viem";
 
 export const HANDLE_SUFFIX = "omnia";
 export const HANDLE_PATTERN = /^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){1,30}[a-z0-9]$/;
@@ -21,6 +24,8 @@ export const HEADER = {
 } as const;
 
 const enc = new TextEncoder();
+const toHex = (bytes: Uint8Array): Hex => `0x${[...bytes].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+const fromHex = (hex: string): Uint8Array => Uint8Array.from((hex.replace(/^0x/, "").match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)));
 
 /** "Scout.omnia", "scout" and " scout.OMNIA " all become "scout". Throws when the handle is not valid. */
 export function normalizeHandle(input: string): string {
@@ -33,6 +38,20 @@ export function normalizeHandle(input: string): string {
 
 export const displayHandle = (handle: string): string => `${handle}.${HANDLE_SUFFIX}`;
 
+/** True for a 20 byte 0x address. A mixed-case address must carry a correct checksum. */
+export function isAddress(value: unknown): value is string {
+  return typeof value === "string" && isHexAddress(value);
+}
+
+/** The one spelling of an address used everywhere: 0x and the EIP-55 checksum. Throws when it is not an address. */
+export function normalizeAddress(value: string): string {
+  if (!isAddress(value)) throw new Error("That is not a 0x address.");
+  return getAddress(value);
+}
+
+/** Two addresses are the same wallet whatever their letter case. */
+export const sameAddress = (a: string | null | undefined, b: string | null | undefined): boolean => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
 export async function sha256Hex(data: Uint8Array | string): Promise<string> {
   const bytes = typeof data === "string" ? enc.encode(data) : data;
   const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
@@ -42,42 +61,44 @@ export async function sha256Hex(data: Uint8Array | string): Promise<string> {
 export function randomNonce(bytes = 16): string {
   const b = new Uint8Array(bytes);
   crypto.getRandomValues(b);
-  return bs58.encode(b);
+  return toHex(b).slice(2);
 }
 
-/** A 32 byte ed25519 seed makes the key pair. Solana secret keys are 64 bytes: the seed followed by the public key. */
-export async function keyFromSeed(seed: Uint8Array): Promise<{ seed: Uint8Array; publicKey: Uint8Array; address: string }> {
-  if (seed.length !== 32) throw new Error("An ed25519 seed is 32 bytes.");
-  const publicKey = await ed.getPublicKeyAsync(seed);
-  return { seed, publicKey, address: bs58.encode(publicKey) };
+/** A 32 byte secp256k1 private key makes the key pair and its 0x address. */
+export async function keyFromSeed(seed: Uint8Array): Promise<{ seed: Uint8Array; address: string }> {
+  if (seed.length !== 32) throw new Error("A private key is 32 bytes.");
+  return { seed, address: privateKeyToAccount(toHex(seed)).address };
 }
 
 export async function generateKey() {
-  return keyFromSeed(ed.utils.randomPrivateKey());
+  return keyFromSeed(fromHex(generatePrivateKey()));
 }
 
-/** Accepts a 64 byte Solana secret key or a 32 byte seed, as bytes, a JSON array or base58 text. */
+/** Accepts a 32 byte private key as bytes, a JSON array of numbers, or hex text with or without 0x. */
 export function seedFromSecret(secret: Uint8Array | number[] | string): Uint8Array {
   let bytes: Uint8Array;
   if (typeof secret === "string") {
     const t = secret.trim();
-    bytes = t.startsWith("[") ? Uint8Array.from(JSON.parse(t) as number[]) : bs58.decode(t);
+    if (t.startsWith("[")) bytes = Uint8Array.from(JSON.parse(t) as number[]);
+    else if (/^(0x)?[0-9a-fA-F]{64}$/.test(t)) bytes = fromHex(t);
+    else throw new Error("A private key is 64 hex characters, with or without 0x.");
   } else bytes = Uint8Array.from(secret);
-  if (bytes.length === 64) return bytes.slice(0, 32);
-  if (bytes.length === 32) return bytes;
-  throw new Error("A secret key is 32 or 64 bytes.");
+  if (bytes.length !== 32) throw new Error("A private key is 32 bytes.");
+  return bytes;
 }
 
+/** The private key as wallets import it: 0x and 64 hex characters. */
+export const secretToHex = (seed: Uint8Array): Hex => toHex(seed);
+
+/** Sign a text the way a wallet signs a message (EIP-191). The signature is 65 bytes, as 0x hex. */
 export async function signText(seed: Uint8Array, text: string): Promise<string> {
-  return bs58.encode(await ed.signAsync(enc.encode(text), seed));
+  return privateKeyToAccount(toHex(seed)).signMessage({ message: text });
 }
 
 export async function verifyText(address: string, text: string, signature: string): Promise<boolean> {
   try {
-    const key = bs58.decode(address);
-    const sig = bs58.decode(signature);
-    if (key.length !== 32 || sig.length !== 64) return false;
-    return await ed.verifyAsync(sig, enc.encode(text), key);
+    if (!isAddress(address) || !/^0x[0-9a-fA-F]{130}$/.test(signature)) return false;
+    return sameAddress(await recoverMessageAddress({ message: text, signature: signature as Hex }), address);
   } catch {
     return false;
   }
@@ -132,8 +153,8 @@ export async function signRequest(
 export type VerifyFailure = "missing" | "handle" | "expired" | "signature";
 
 /**
- * Check the signature headers of a request against the agent's public key.
- * The caller resolves the handle to its key and rejects a nonce it has seen before.
+ * Check the signature headers of a request against the agent's address.
+ * The caller resolves the handle to its address and rejects a nonce it has seen before.
  */
 export async function verifyRequest(input: {
   headers: { get(name: string): string | null };
@@ -173,7 +194,7 @@ export async function verifyRequest(input: {
 export function ownerMessage(handle: string, agentAddress: string, ownerAddress: string, issuedAt: string): string {
   return [
     `Omnia: I am the owner of the agent ${displayHandle(handle)}.`,
-    `Agent key: ${agentAddress}`,
+    `Agent address: ${agentAddress}`,
     `Owner wallet: ${ownerAddress}`,
     `Issued: ${issuedAt}`,
   ].join("\n");

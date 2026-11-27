@@ -1,237 +1,155 @@
 /**
- * Static verification of an x402 payment transaction, as the Omnia
- * facilitator runs it before it adds the fee payer's signature.
+ * Static verification of an x402 payment, as the Omnia facilitator runs it
+ * before it submits anything.
  *
- * A payment comes in one of two shapes. Sponsored: the relayer is the fee
- * payer and the agent is the second signer. Self-paid: the agent is the fee
- * payer and the only signer, and the relayer signs nothing and spends nothing.
+ * A payment comes in one of two shapes. Sponsored: the payer sends its signed
+ * `Payment` message and the relayer submits it and pays the gas. Self-paid:
+ * the payer also sends a transaction it has signed itself, which calls the
+ * settling contract with that same message, and the relayer signs nothing and
+ * spends nothing.
  *
- * Everything here is pure: bytes in, verdict out. It follows the static
- * layout of the `exact` Solana scheme with splits (section 5.7): compute
- * budget, compute price, one transfer per leg in order, then a memo. A leg
- * is an SPL `TransferChecked` or a Squads v4 `spendingLimitUse`.
- *
- * The facilitator then simulates the transaction against the chain, which is
- * what proves the money is really there and the spending limit allows it.
+ * Everything here is pure: a payload in, a verdict out. It proves who signed,
+ * and that what was signed is exactly the transfers the charge asks for. The
+ * facilitator then simulates the call against the chain, which is what proves
+ * the money is there and, for a guarded wallet, that its limits allow it.
  */
-import { ComputeBudgetProgram, PublicKey, VersionedTransaction } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
-import bs58 from "bs58";
-import {
-  MEMO_PROGRAM,
-  SPENDING_LIMIT_USE_DISCRIMINATOR,
-  SQUADS_PROGRAM,
-  SOLANA_MAINNET,
-  base64ToBytes,
-  legsOf,
-  multisigVault,
-  type Leg,
-  type PaymentRequirements,
-} from "./x402";
+import { getAddress, keccak256, parseTransaction, recoverTransactionAddress, type Hex, type TransactionSerialized } from "viem";
+import { ELYSIUM, ELYSIUM_CHAIN_ID, USDC_ADDRESS, legsOf, paymentNonce, recoverPaymentSigner, settleCall, type Leg, type PaymentRequirements, type SignedPayment } from "./x402";
 
-/** What the fee payer is prepared to sponsor. */
+/** What the relayer is prepared to submit. */
 export const SPONSOR_LIMITS = {
-  maxComputeUnits: 400_000,
-  /** The priority fee the fee payer pays is units x price. This cap keeps it under 0.00004 SOL. */
-  maxMicroLamportsPerUnit: 100,
   maxSplits: 1,
   maxMemoBytes: 256,
+  /** How far past the offer's window a deadline may be, to allow for clocks that differ. */
+  clockSkewSeconds: 30,
 } as const;
+
+/** The most gas a self-paid transaction may ask for. A payment uses well under half of this. */
+export const SELF_PAID_GAS_LIMIT = 1_500_000n;
 
 export type VerifyReason =
   | "unsupported_scheme"
   | "unsupported_network"
+  | "unsupported_asset"
   | "invalid_requirements"
   | "split_count_exceeded"
+  | "invalid_payload"
+  | "expired"
+  | "deadline_too_far"
+  | "signature_mismatch"
+  | "invalid_permit"
   | "invalid_transaction"
-  | "unsupported_transaction_version"
-  | "address_lookup_tables_not_allowed"
-  | "fee_payer_mismatch"
-  | "fee_payer_in_instruction"
-  | "too_many_signers"
-  | "payer_signature_missing"
-  | "instruction_order"
-  | "compute_limit_too_high"
-  | "compute_price_too_high"
-  | "unknown_instruction"
-  | "leg_unmatched"
-  | "leg_amount_mismatch"
-  | "leg_recipient_mismatch"
-  | "leg_asset_mismatch"
-  | "mixed_sources"
-  | "memo_mismatch"
-  | "memo_too_long";
+  | "transaction_mismatch";
 
 export interface VerifiedPayment {
   ok: true;
-  /** The key that signed the payment: the agent. */
+  /** The payment's number: the hash of the offer's memo. It can settle once. */
+  paymentId: Hex;
+  /** The agent key that signed. */
   signer: string;
-  /** Where the money comes from: the agent's own wallet, or a guarded wallet's vault. */
-  source: "wallet" | "guarded";
-  /** The account the USDC leaves: the signer, or the Squads vault. */
+  /** Whose USDC moves: the signer itself, or its guarded wallet. */
   payer: string;
-  /** Set for guarded payments. */
-  multisig: string | null;
-  spendingLimit: string | null;
+  source: "wallet" | "guarded";
+  /** The Safe, for a guarded payment. */
+  safe: string | null;
   legs: Leg[];
   total: bigint;
-  memo: string | null;
-  /** The signer's signature over the message. Unique per payment, used to refuse a replay. */
-  paymentId: string;
-  transaction: VersionedTransaction;
+  /** The call that settles the payment. */
+  call: { to: `0x${string}`; data: Hex };
+  /** True when the payload carries the one-time approval of the splitter. */
+  withPermit: boolean;
+  /** The payer's own signed transaction, when the payer pays its own gas. Null for a sponsored payment. */
+  selfPaid: { raw: Hex; hash: Hex; gas: bigint; maxFeePerGas: bigint; nonce: number } | null;
 }
 
 export type VerifyResult = VerifiedPayment | { ok: false; reason: VerifyReason; detail?: string };
 
 const fail = (reason: VerifyReason, detail?: string): VerifyResult => ({ ok: false, reason, detail });
-
-function readU64(data: Uint8Array, offset: number): bigint {
-  return new DataView(data.buffer, data.byteOffset, data.byteLength).getBigUint64(offset, true);
-}
-function readU32(data: Uint8Array, offset: number): number {
-  return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(offset, true);
-}
-
-/** The fee payer of a serialized payment transaction: its first account. Null when the bytes are not a version 0 transaction. */
-export function feePayerOf(transactionBase64: string): string | null {
-  try {
-    const tx = VersionedTransaction.deserialize(base64ToBytes(transactionBase64));
-    return tx.message.version === 0 ? (tx.message.staticAccountKeys[0]?.toBase58() ?? null) : null;
-  } catch {
-    return null;
-  }
-}
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
+const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 /**
- * `selfPaid` checks the shape in which the payer is its own fee payer: one signer, which is both. The
- * requirements must then name that payer as `extra.feePayer`.
+ * Check a signed payment against the requirements the facilitator rebuilt from its own charge.
+ * `req.extra.validBefore` is the deadline the payer signed, taken from the payload: it is checked here.
  */
-export function verifyPayment(transactionBase64: string, req: PaymentRequirements, expect: { feePayer: string; maxSplits?: number; selfPaid?: boolean }): VerifyResult {
+export async function verifyPayment(signed: SignedPayment, req: PaymentRequirements, opts: { maxSplits?: number; now?: number } = {}): Promise<VerifyResult> {
   if (req.scheme !== "exact") return fail("unsupported_scheme");
-  if (req.network !== SOLANA_MAINNET) return fail("unsupported_network");
-  if (req.extra?.feePayer !== expect.feePayer) return fail("fee_payer_mismatch", "requirements name another fee payer");
-  if ((req.extra.splits?.length ?? 0) > (expect.maxSplits ?? SPONSOR_LIMITS.maxSplits)) return fail("split_count_exceeded");
-
+  if (req.network !== ELYSIUM) return fail("unsupported_network");
+  if (!same(req.asset, USDC_ADDRESS)) return fail("unsupported_asset");
+  if ((req.extra.splits?.length ?? 0) > (opts.maxSplits ?? SPONSOR_LIMITS.maxSplits)) return fail("split_count_exceeded");
+  if (typeof req.extra.memo !== "string" || req.extra.memo.length === 0 || new TextEncoder().encode(req.extra.memo).length > SPONSOR_LIMITS.maxMemoBytes) return fail("invalid_requirements", "memo");
   let legs: Leg[];
-  let mint: PublicKey;
   try {
     legs = legsOf(req);
-    mint = new PublicKey(req.asset);
-    for (const l of legs) new PublicKey(l.payTo);
   } catch (e) {
     return fail("invalid_requirements", (e as Error).message);
   }
 
-  let tx: VersionedTransaction;
+  if (!signed || typeof signed !== "object") return fail("invalid_payload");
+  if (!ADDRESS.test(String(signed.payer)) || !ADDRESS.test(String(signed.signer)) || !SIGNATURE.test(String(signed.signature))) return fail("invalid_payload", "payer, signer and signature are required");
+
+  const now = opts.now ?? Math.floor(Date.now() / 1000);
+  if (!/^\d{1,12}$/.test(String(req.extra.validBefore))) return fail("invalid_requirements", "validBefore");
+  const validBefore = Number(req.extra.validBefore);
+  if (validBefore <= now) return fail("expired");
+  if (validBefore > now + req.maxTimeoutSeconds + SPONSOR_LIMITS.clockSkewSeconds) return fail("deadline_too_far");
+
+  const guarded = !same(signed.payer, signed.signer);
+  let recovered: string;
   try {
-    tx = VersionedTransaction.deserialize(base64ToBytes(transactionBase64));
+    recovered = await recoverPaymentSigner(req, signed.payer, guarded, signed.signature);
   } catch {
-    return fail("invalid_transaction");
+    return fail("signature_mismatch");
   }
-  const msg = tx.message;
-  if (msg.version !== 0) return fail("unsupported_transaction_version");
-  if (msg.addressTableLookups.length > 0) return fail("address_lookup_tables_not_allowed");
+  // A payment that names other recipients, another amount, another deadline or another offer recovers to another address.
+  if (!same(recovered, signed.signer)) return fail("signature_mismatch", "the signature is not this signer's signature over these terms");
 
-  const keys = msg.staticAccountKeys;
-  const feePayer = new PublicKey(expect.feePayer);
-  if (!keys[0].equals(feePayer)) return fail("fee_payer_mismatch");
-  const selfPaid = expect.selfPaid === true;
-  const required = msg.header.numRequiredSignatures;
-  const needed = selfPaid ? 1 : 2;
-  if (required !== needed) return fail("too_many_signers", `the transaction needs ${required} signatures, ${selfPaid ? "a self-paid payment needs exactly 1" : "a payment needs exactly 2"}`);
-  const signer = keys[needed - 1];
-  const signature = tx.signatures[needed - 1];
-  if (!signature || signature.every((b) => b === 0)) return fail("payer_signature_missing");
+  if (signed.permit !== undefined) {
+    if (guarded) return fail("invalid_permit", "a guarded wallet needs no permit");
+    const p = signed.permit;
+    if (!p || !/^\d{1,78}$/.test(String(p.value)) || !/^\d{1,12}$/.test(String(p.deadline)) || !SIGNATURE.test(String(p.signature))) return fail("invalid_permit");
+    if (Number(p.deadline) <= now) return fail("invalid_permit", "the approval has expired");
+  }
 
-  const ixs = msg.compiledInstructions;
-  // A sponsoring fee payer pays the network fee and nothing else: it may not be an account of any instruction.
-  if (!selfPaid) {
-    for (const ix of ixs) {
-      if (ix.accountKeyIndexes.includes(0)) return fail("fee_payer_in_instruction");
+  let call: { to: `0x${string}`; data: Hex };
+  try {
+    call = settleCall(req, signed, guarded);
+  } catch (e) {
+    return fail("invalid_payload", (e as Error).message);
+  }
+
+  let selfPaid: VerifiedPayment["selfPaid"] = null;
+  if (signed.transaction !== undefined) {
+    if (typeof signed.transaction !== "string" || !/^0x02[0-9a-fA-F]+$/.test(signed.transaction)) return fail("invalid_transaction", "an EIP-1559 transaction is required");
+    try {
+      const tx = parseTransaction(signed.transaction as TransactionSerialized<"eip1559">);
+      const from = await recoverTransactionAddress({ serializedTransaction: signed.transaction as TransactionSerialized<"eip1559"> });
+      if (tx.chainId !== ELYSIUM_CHAIN_ID) return fail("transaction_mismatch", "wrong chain");
+      if (!same(from, signed.signer)) return fail("transaction_mismatch", "the transaction is not signed by the payment's signer");
+      if (!tx.to || !same(tx.to, call.to)) return fail("transaction_mismatch", "the transaction does not call the settling contract");
+      if ((tx.data ?? "0x").toLowerCase() !== call.data.toLowerCase()) return fail("transaction_mismatch", "the transaction does not carry this payment");
+      if ((tx.value ?? 0n) !== 0n) return fail("transaction_mismatch", "the transaction must carry no HYPE");
+      if ((tx.accessList?.length ?? 0) > 0) return fail("transaction_mismatch", "an access list is not allowed");
+      const gas = tx.gas ?? 0n;
+      if (gas <= 0n || gas > SELF_PAID_GAS_LIMIT) return fail("transaction_mismatch", "the gas limit is out of range");
+      selfPaid = { raw: signed.transaction, hash: keccak256(signed.transaction), gas, maxFeePerGas: tx.maxFeePerGas ?? 0n, nonce: tx.nonce ?? 0 };
+    } catch {
+      return fail("invalid_transaction");
     }
   }
 
-  const expected = 2 + legs.length;
-  if (ixs.length !== expected && ixs.length !== expected + 1) return fail("instruction_order", `expected ${expected} or ${expected + 1} instructions, found ${ixs.length}`);
-
-  // 1. compute unit limit
-  const limitIx = ixs[0];
-  if (!keys[limitIx.programIdIndex].equals(ComputeBudgetProgram.programId) || limitIx.data[0] !== 2 || limitIx.data.length !== 5) return fail("instruction_order", "the first instruction must set the compute unit limit");
-  if (readU32(limitIx.data, 1) > SPONSOR_LIMITS.maxComputeUnits) return fail("compute_limit_too_high");
-  // 2. compute unit price
-  const priceIx = ixs[1];
-  if (!keys[priceIx.programIdIndex].equals(ComputeBudgetProgram.programId) || priceIx.data[0] !== 3 || priceIx.data.length !== 9) return fail("instruction_order", "the second instruction must set the compute unit price");
-  if (readU64(priceIx.data, 1) > BigInt(SPONSOR_LIMITS.maxMicroLamportsPerUnit)) return fail("compute_price_too_high");
-
-  // 3. one transfer per leg, in order
-  let source: "wallet" | "guarded" | null = null;
-  let multisig: PublicKey | null = null;
-  let spendingLimit: PublicKey | null = null;
-  for (let i = 0; i < legs.length; i++) {
-    const leg = legs[i];
-    const ix = ixs[2 + i];
-    const program = keys[ix.programIdIndex];
-    const acct = (n: number) => keys[ix.accountKeyIndexes[n]];
-    const to = new PublicKey(leg.payTo);
-    const toAta = getAssociatedTokenAddressSync(mint, to, true);
-
-    if (program.equals(TOKEN_PROGRAM_ID)) {
-      // TransferChecked: [source, mint, destination, authority], data = 12, amount u64, decimals u8
-      if (ix.data[0] !== 12 || ix.data.length !== 10 || ix.accountKeyIndexes.length !== 4) return fail("unknown_instruction", "only TransferChecked is accepted from the token program");
-      if (source === "guarded") return fail("mixed_sources");
-      source = "wallet";
-      if (!acct(1).equals(mint)) return fail("leg_asset_mismatch");
-      if (!acct(3).equals(signer)) return fail("leg_unmatched", "the transfer authority must be the payer that signed");
-      if (!acct(0).equals(getAssociatedTokenAddressSync(mint, signer, true))) return fail("leg_unmatched", "the transfer must come from the payer's own token account");
-      if (!acct(2).equals(toAta)) return fail("leg_recipient_mismatch");
-      if (readU64(ix.data, 1) !== leg.amount) return fail("leg_amount_mismatch");
-    } else if (program.equals(SQUADS_PROGRAM)) {
-      // spendingLimitUse: see spendingLimitUseInstruction for the account order
-      const d = ix.data;
-      if (d.length !== 18 || !SPENDING_LIMIT_USE_DISCRIMINATOR.every((b, n) => d[n] === b) || ix.accountKeyIndexes.length !== 10) return fail("unknown_instruction", "only spendingLimitUse without a memo is accepted from the Squads program");
-      if (source === "wallet") return fail("mixed_sources");
-      source = "guarded";
-      if (d[17] !== 0) return fail("unknown_instruction");
-      if (multisig && !acct(0).equals(multisig)) return fail("mixed_sources");
-      multisig = acct(0);
-      spendingLimit = acct(2);
-      if (!acct(1).equals(signer)) return fail("leg_unmatched", "the spending limit member must be the agent that signed");
-      const vault = multisigVault(multisig, 0);
-      if (!acct(3).equals(vault)) return fail("leg_unmatched", "the vault does not belong to the multisig");
-      if (!acct(4).equals(to)) return fail("leg_recipient_mismatch");
-      if (!acct(6).equals(mint)) return fail("leg_asset_mismatch");
-      if (!acct(7).equals(getAssociatedTokenAddressSync(mint, vault, true))) return fail("leg_unmatched");
-      if (!acct(8).equals(toAta)) return fail("leg_recipient_mismatch");
-      if (!acct(9).equals(TOKEN_PROGRAM_ID)) return fail("leg_asset_mismatch");
-      if (readU64(d, 8) !== leg.amount) return fail("leg_amount_mismatch");
-      if (d[16] !== 6) return fail("leg_asset_mismatch");
-    } else {
-      return fail("unknown_instruction", `program ${program.toBase58()} is not part of a payment`);
-    }
-  }
-
-  // 4. an optional memo, which must be the one the offer asked for when it asked for one
-  let memo: string | null = null;
-  if (ixs.length === expected + 1) {
-    const m = ixs[expected];
-    if (!keys[m.programIdIndex].equals(MEMO_PROGRAM) || m.accountKeyIndexes.length !== 0) return fail("unknown_instruction", "the last instruction must be a memo");
-    if (m.data.length > SPONSOR_LIMITS.maxMemoBytes) return fail("memo_too_long");
-    memo = new TextDecoder().decode(m.data);
-  }
-  if (req.extra.memo !== undefined && memo !== req.extra.memo) return fail("memo_mismatch");
-
-  const vault = multisig ? multisigVault(multisig, 0) : null;
   return {
     ok: true,
-    signer: signer.toBase58(),
-    source: source as "wallet" | "guarded",
-    payer: (vault ?? signer).toBase58(),
-    multisig: multisig?.toBase58() ?? null,
-    spendingLimit: spendingLimit?.toBase58() ?? null,
+    paymentId: paymentNonce(req.extra.memo),
+    signer: getAddress(signed.signer),
+    payer: getAddress(signed.payer),
+    source: guarded ? "guarded" : "wallet",
+    safe: guarded ? getAddress(signed.payer) : null,
     legs,
     total: BigInt(req.amount),
-    memo,
-    paymentId: bs58.encode(signature),
-    transaction: tx,
+    call,
+    withPermit: signed.permit !== undefined,
+    selfPaid,
   };
 }

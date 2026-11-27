@@ -15,5 +15,5 @@ export default defineConfig({
   platform: "neutral",
   splitting: true,
   // The Node entry reads the identity file. Everything else runs wherever fetch and WebCrypto exist.
-  external: [/^node:/, "@solana/web3.js", "@solana/spl-token", "@noble/ed25519", "bs58"],
+  external: [/^node:/, /^viem($|\/)/],
 });

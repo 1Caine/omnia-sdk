@@ -2,10 +2,10 @@
 
 
 
-var _chunk26Y25PPTcjs = require('./chunk-26Y25PPT.cjs');
-require('./chunk-44JN77G2.cjs');
+var _chunkFFVSGRBMcjs = require('./chunk-FFVSGRBM.cjs');
+require('./chunk-MZORSJ6P.cjs');
 
 
 
 
-exports.SPONSOR_LIMITS = _chunk26Y25PPTcjs.SPONSOR_LIMITS; exports.feePayerOf = _chunk26Y25PPTcjs.feePayerOf; exports.verifyPayment = _chunk26Y25PPTcjs.verifyPayment;
+exports.SELF_PAID_GAS_LIMIT = _chunkFFVSGRBMcjs.SELF_PAID_GAS_LIMIT; exports.SPONSOR_LIMITS = _chunkFFVSGRBMcjs.SPONSOR_LIMITS; exports.verifyPayment = _chunkFFVSGRBMcjs.verifyPayment;

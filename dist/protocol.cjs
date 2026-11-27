@@ -21,7 +21,11 @@
 
 
 
-var _chunkWUELDQORcjs = require('./chunk-WUELDQOR.cjs');
+
+
+
+
+var _chunkUTTT7ULNcjs = require('./chunk-UTTT7ULN.cjs');
 
 
 
@@ -45,4 +49,8 @@ var _chunkWUELDQORcjs = require('./chunk-WUELDQOR.cjs');
 
 
 
-exports.HANDLE_PATTERN = _chunkWUELDQORcjs.HANDLE_PATTERN; exports.HANDLE_SUFFIX = _chunkWUELDQORcjs.HANDLE_SUFFIX; exports.HEADER = _chunkWUELDQORcjs.HEADER; exports.displayHandle = _chunkWUELDQORcjs.displayHandle; exports.generateKey = _chunkWUELDQORcjs.generateKey; exports.hmacHex = _chunkWUELDQORcjs.hmacHex; exports.keyFromSeed = _chunkWUELDQORcjs.keyFromSeed; exports.normalizeHandle = _chunkWUELDQORcjs.normalizeHandle; exports.ownerMessage = _chunkWUELDQORcjs.ownerMessage; exports.randomNonce = _chunkWUELDQORcjs.randomNonce; exports.registerMessage = _chunkWUELDQORcjs.registerMessage; exports.requestMessage = _chunkWUELDQORcjs.requestMessage; exports.seedFromSecret = _chunkWUELDQORcjs.seedFromSecret; exports.sha256Hex = _chunkWUELDQORcjs.sha256Hex; exports.signInMessage = _chunkWUELDQORcjs.signInMessage; exports.signRequest = _chunkWUELDQORcjs.signRequest; exports.signText = _chunkWUELDQORcjs.signText; exports.verifyRequest = _chunkWUELDQORcjs.verifyRequest; exports.verifySignIn = _chunkWUELDQORcjs.verifySignIn; exports.verifyText = _chunkWUELDQORcjs.verifyText; exports.verifyWebhook = _chunkWUELDQORcjs.verifyWebhook; exports.webhookSignature = _chunkWUELDQORcjs.webhookSignature;
+
+
+
+
+exports.HANDLE_PATTERN = _chunkUTTT7ULNcjs.HANDLE_PATTERN; exports.HANDLE_SUFFIX = _chunkUTTT7ULNcjs.HANDLE_SUFFIX; exports.HEADER = _chunkUTTT7ULNcjs.HEADER; exports.displayHandle = _chunkUTTT7ULNcjs.displayHandle; exports.generateKey = _chunkUTTT7ULNcjs.generateKey; exports.hmacHex = _chunkUTTT7ULNcjs.hmacHex; exports.isAddress = _chunkUTTT7ULNcjs.isAddress; exports.keyFromSeed = _chunkUTTT7ULNcjs.keyFromSeed; exports.normalizeAddress = _chunkUTTT7ULNcjs.normalizeAddress; exports.normalizeHandle = _chunkUTTT7ULNcjs.normalizeHandle; exports.ownerMessage = _chunkUTTT7ULNcjs.ownerMessage; exports.randomNonce = _chunkUTTT7ULNcjs.randomNonce; exports.registerMessage = _chunkUTTT7ULNcjs.registerMessage; exports.requestMessage = _chunkUTTT7ULNcjs.requestMessage; exports.sameAddress = _chunkUTTT7ULNcjs.sameAddress; exports.secretToHex = _chunkUTTT7ULNcjs.secretToHex; exports.seedFromSecret = _chunkUTTT7ULNcjs.seedFromSecret; exports.sha256Hex = _chunkUTTT7ULNcjs.sha256Hex; exports.signInMessage = _chunkUTTT7ULNcjs.signInMessage; exports.signRequest = _chunkUTTT7ULNcjs.signRequest; exports.signText = _chunkUTTT7ULNcjs.signText; exports.verifyRequest = _chunkUTTT7ULNcjs.verifyRequest; exports.verifySignIn = _chunkUTTT7ULNcjs.verifySignIn; exports.verifyText = _chunkUTTT7ULNcjs.verifyText; exports.verifyWebhook = _chunkUTTT7ULNcjs.verifyWebhook; exports.webhookSignature = _chunkUTTT7ULNcjs.webhookSignature;
